@@ -22,7 +22,6 @@ const PopupContainer = SpotlightContainerDecorator({
 
 const HOURS_TO_DISPLAY = 6;
 const PIXELS_PER_HOUR = 600;
-const CHANNEL_ROW_HEIGHT = 80;
 const CHANNEL_COLUMN_WIDTH = 200; // matches @channel-column-width in the .less
 const ROW_HEIGHT = 80;            // matches @row-height (raw px, not ri.scale)
 const MINUTES_PER_PIXEL = 60 / PIXELS_PER_HOUR;
@@ -74,7 +73,6 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 	const [selectedProgram, setSelectedProgram] = useState(null);
 	const [channelNumberBuffer, setChannelNumberBuffer] = useState('');
 
-	const guideContentRef = useRef(null);
 	const guideHorizontalRef = useRef(null);
 	const scrollToRef = useRef(null);
 	const timeSlotsRef = useRef(null);
@@ -175,17 +173,16 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 		channelNumberTimeoutRef.current = setTimeout(() => {
 			const channelNum = channelNumberBuffer + digit;
 			const channelIndex = filteredChannelsRef.current.findIndex(ch => ch.ChannelNumber === channelNum);
-			if (channelIndex >= 0) {
-				const channel = filteredChannelsRef.current[channelIndex];
-				const guideContent = guideContentRef.current;
-				if (guideContent) {
-					guideContent.scrollTop = Math.max(0, channelIndex * CHANNEL_ROW_HEIGHT - guideContent.clientHeight / 2);
-				}
-				setTimeout(() => {
-					const row = document.querySelector(`[data-channel-id="${channel.Id}"]`);
-					const spottable = row && row.querySelector('[tabindex]');
-					if (spottable) spottable.focus();
-				}, 100);
+			if (channelIndex >= 0 && scrollToRef.current) {
+				const target = filteredChannelsRef.current[channelIndex];
+				scrollToRef.current({index: channelIndex, animate: false});
+
+				let attempts = 0;
+				const focusChannel = () => {
+					if (Spotlight.focus(`ch-info-${target.Id}`)) return;
+					if (attempts++ < 5) setTimeout(focusChannel, 50);
+				};
+				setTimeout(focusChannel, 0);
 			}
 			setChannelNumberBuffer('');
 		}, 1500);
