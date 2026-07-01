@@ -3,6 +3,7 @@ import Spottable from '@enact/spotlight/Spottable';
 import SpotlightContainerDecorator from '@enact/spotlight/SpotlightContainerDecorator';
 import Spotlight from '@enact/spotlight';
 import VirtualList from '@enact/sandstone/VirtualList';
+import Scroller from '@enact/sandstone/Scroller';
 import $L from '@enact/i18n/$L';
 import {useAuth} from '../../context/AuthContext';
 import LoadingSpinner from '../../components/LoadingSpinner';
@@ -28,23 +29,18 @@ const MINUTES_PER_PIXEL = 60 / PIXELS_PER_HOUR;
 const CHANNELS_PER_BATCH = 50;
 const GUIDE_CONTROL_IDS = ['prev-day', 'next-day', 'today', 'filter', 'recordings'];
 
-const ProgramCell = ({program, channel, style, isCurrent, onProgramClick}) => {
+const ProgramCell = ({program, channel, style, isCurrent, onProgramClick, dataIndex}) => {
 	const handleClick = useCallback(() => {
 		onProgramClick(program, channel);
 	}, [program, channel, onProgramClick]);
-
-	const handleFocus = useCallback((e) => {
-		const el = e.currentTarget || e.target;
-		if (el) el.scrollIntoView({behavior: 'smooth', block: 'nearest', inline: 'nearest'});
-	}, []);
 
 	return (
 		<SpottableDiv
 			className={`${css.programCell} ${isCurrent ? css.current : ''}`}
 			style={style}
 			onClick={handleClick}
-			onFocus={handleFocus}
 			data-program-id={program.Id}
+			data-index={dataIndex}
 			spotlightId={`program-${channel.Id}-${program.Id}`}
 		>
 			<div className={css.programTime}>
@@ -73,7 +69,6 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 	const [selectedProgram, setSelectedProgram] = useState(null);
 	const [channelNumberBuffer, setChannelNumberBuffer] = useState('');
 
-	const guideHorizontalRef = useRef(null);
 	const scrollToRef = useRef(null);
 	const timeSlotsRef = useRef(null);
 	const channelNumberTimeoutRef = useRef(null);
@@ -231,10 +226,9 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 		return () => window.removeEventListener('keydown', handleKeyDown, true);
 	}, [selectedProgram, handleChannelNumber]);
 
-	const handleHorizontalScroll = useCallback(() => {
-		const scroller = guideHorizontalRef.current;
-		if (scroller && timeSlotsRef.current) {
-			timeSlotsRef.current.scrollLeft = scroller.scrollLeft;
+	const handleHorizontalScroll = useCallback(({scrollLeft}) => {
+		if (timeSlotsRef.current) {
+			timeSlotsRef.current.scrollLeft = scrollLeft;
 		}
 	}, []);
 
@@ -376,6 +370,7 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 					className={css.channelInfo}
 					onClick={() => onPlayChannel?.(channel)} // eslint-disable-line react/jsx-no-bind
 					data-channel-id={channel.Id}
+					data-index={rest['data-index']}
 					spotlightId={`ch-info-${channel.Id}`}
 				>
 					<div className={css.channelNumber}>{channel.ChannelNumber}</div>
@@ -406,6 +401,7 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 								style={style}
 								isCurrent={isCurrentProgram(program)}
 								onProgramClick={handleProgramClick}
+								dataIndex={rest['data-index']}
 							/>
 						);
 					})}
@@ -486,9 +482,11 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 						</div>
 					</div>
 
-					<div
+					<Scroller
 						className={css.guideHorizontalScroller}
-						ref={guideHorizontalRef}
+						direction="horizontal"
+						horizontalScrollbar="hidden"
+						verticalScrollbar="hidden"
 						onScroll={handleHorizontalScroll}
 					>
 						<div
@@ -513,7 +511,7 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 								/>
 							)}
 						</div>
-					</div>
+					</Scroller>
 				</div>
 			</div>
 
