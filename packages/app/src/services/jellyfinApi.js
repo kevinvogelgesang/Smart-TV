@@ -365,7 +365,7 @@ export const api = {
 		request(`/Items/${itemId}/ThemeSongs?UserId=${currentUser}&InheritFromParent=${inheritFromParent}`),
 
 	getLiveTvChannels: (startIndex = 0, limit = 50) =>
-		request(`/LiveTv/Channels?UserId=${currentUser}&EnableFavoriteSorting=true&StartIndex=${startIndex}&Limit=${limit}`),
+		request(`/LiveTv/Channels?UserId=${currentUser}&EnableUserData=true&EnableFavoriteSorting=false&SortBy=SortName&SortOrder=Ascending&StartIndex=${startIndex}&Limit=${limit}`),
 
 	getLiveTvPrograms: (channelIds, startDate, endDate) => {
 		const channelParam = Array.isArray(channelIds) ? channelIds.join(',') : channelIds;

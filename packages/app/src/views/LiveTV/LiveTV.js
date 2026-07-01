@@ -29,16 +29,33 @@ const MINUTES_PER_PIXEL = 60 / PIXELS_PER_HOUR;
 const CHANNELS_PER_BATCH = 50;
 const GUIDE_CONTROL_IDS = ['prev-day', 'next-day', 'today', 'filter', 'recordings'];
 
-const ProgramCell = ({program, channel, style, isCurrent, onProgramClick, dataIndex}) => {
+const guideCache = {
+	channels: null,
+	programs: null,
+	currentChannelIndex: 0,
+	hasMoreChannels: true,
+	showFavoritesOnly: false,
+	currentDateISO: null,
+	lastFocusedChannelId: null,
+	lastFocusedIndex: 0,
+	horizontalScrollLeft: 0
+};
+
+const ProgramCell = ({program, channel, style, isCurrent, onProgramClick, onProgramFocus, dataIndex}) => {
 	const handleClick = useCallback(() => {
 		onProgramClick(program, channel);
 	}, [program, channel, onProgramClick]);
+
+	const handleFocus = useCallback(() => {
+		onProgramFocus(parseFloat(style.left) || 0);
+	}, [onProgramFocus, style.left]);
 
 	return (
 		<SpottableDiv
 			className={`${css.programCell} ${isCurrent ? css.current : ''}`}
 			style={style}
 			onClick={handleClick}
+			onFocus={handleFocus}
 			data-program-id={program.Id}
 			data-index={dataIndex}
 			spotlightId={`program-${channel.Id}-${program.Id}`}
@@ -60,21 +77,25 @@ const ProgramCell = ({program, channel, style, isCurrent, onProgramClick, dataIn
 
 const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 	const {api, serverUrl} = useAuth();
-	const [channels, setChannels] = useState([]);
-	const [programs, setPrograms] = useState({});
+	const [channels, setChannels] = useState(() => guideCache.channels || []);
+	const [programs, setPrograms] = useState(() => guideCache.programs || {});
 	const filteredChannelsRef = useRef([]);
-	const [currentDate, setCurrentDate] = useState(new Date());
-	const [isLoading, setIsLoading] = useState(true);
-	const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+	const [currentDate, setCurrentDate] = useState(() => (guideCache.currentDateISO ? new Date(guideCache.currentDateISO) : new Date()));
+	const [isLoading, setIsLoading] = useState(() => !(guideCache.channels && guideCache.channels.length));
+	const [showFavoritesOnly, setShowFavoritesOnly] = useState(() => guideCache.showFavoritesOnly);
 	const [selectedProgram, setSelectedProgram] = useState(null);
 	const [channelNumberBuffer, setChannelNumberBuffer] = useState('');
 
 	const scrollToRef = useRef(null);
 	const timeSlotsRef = useRef(null);
 	const channelNumberTimeoutRef = useRef(null);
-	const currentChannelIndexRef = useRef(0);
-	const hasMoreChannelsRef = useRef(true);
+	const currentChannelIndexRef = useRef(guideCache.currentChannelIndex || 0);
+	const hasMoreChannelsRef = useRef(guideCache.hasMoreChannels !== false);
 	const isLoadingMoreRef = useRef(false);
+	const horizScrollToRef = useRef(null);
+	const horizontalScrollLeftRef = useRef(guideCache.horizontalScrollLeft || 0);
+	const didRestoreRef = useRef(false);
+	const latestStateRef = useRef(null);
 
 	const getGuideStartTime = useCallback(() => {
 		const start = new Date(currentDate);
@@ -149,7 +170,16 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 		}
 	}, [api, getGuideStartTime, getGuideEndTime]);
 
+	const isFirstLoadEffectRef = useRef(true);
+
 	useEffect(() => {
+		if (isFirstLoadEffectRef.current) {
+			isFirstLoadEffectRef.current = false;
+			if (guideCache.channels && guideCache.channels.length) {
+				return;
+			}
+		}
+
 		const init = async () => {
 			setIsLoading(true);
 			await loadChannels(true);
@@ -226,23 +256,46 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 		return () => window.removeEventListener('keydown', handleKeyDown, true);
 	}, [selectedProgram, handleChannelNumber]);
 
-	const handleHorizontalScroll = useCallback(({scrollLeft}) => {
+	const handleHorizontalScroll = useCallback(({scrollLeft = 0}) => {
+		horizontalScrollLeftRef.current = scrollLeft;
 		if (timeSlotsRef.current) {
 			timeSlotsRef.current.scrollLeft = scrollLeft;
 		}
 	}, []);
 
+	const handleChannelInfoFocus = useCallback(() => {
+		horizScrollToRef.current?.({position: {x: 0}, animate: false});
+	}, []);
+
+	const handleProgramFocus = useCallback((leftPx) => {
+		const x = Math.max(0, leftPx - 24);
+		horizScrollToRef.current?.({position: {x}, animate: false});
+	}, []);
+
+	const invalidateGuideCache = useCallback(() => {
+		guideCache.channels = null;
+		guideCache.programs = null;
+		guideCache.currentChannelIndex = 0;
+		guideCache.hasMoreChannels = true;
+		guideCache.lastFocusedChannelId = null;
+		guideCache.lastFocusedIndex = 0;
+		guideCache.horizontalScrollLeft = 0;
+		didRestoreRef.current = true;
+	}, []);
+
 	const changeDay = useCallback((days) => {
+		invalidateGuideCache();
 		setCurrentDate(prev => {
 			const newDate = new Date(prev);
 			newDate.setDate(newDate.getDate() + days);
 			return newDate;
 		});
-	}, []);
+	}, [invalidateGuideCache]);
 
 	const goToToday = useCallback(() => {
+		invalidateGuideCache();
 		setCurrentDate(new Date());
-	}, []);
+	}, [invalidateGuideCache]);
 
 	const toggleFavorites = useCallback(() => {
 		setShowFavoritesOnly(prev => !prev);
@@ -304,6 +357,13 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 	}, [channels, showFavoritesOnly]);
 	filteredChannelsRef.current = filteredChannels;
 
+	latestStateRef.current = {
+		channels,
+		programs,
+		showFavoritesOnly,
+		currentDate
+	};
+
 	const calculateProgramStyle = useCallback((program) => {
 		const startTime = getGuideStartTime();
 		const guideEndTime = getGuideEndTime();
@@ -344,6 +404,9 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 	}, [getCurrentTimePosition]);
 
 	const handleChannelRowFocus = useCallback((index) => {
+		guideCache.lastFocusedIndex = index;
+		guideCache.lastFocusedChannelId = filteredChannels[index]?.Id || null;
+
 		if (shouldLoadMore({
 			focusedIndex: index,
 			loadedCount: filteredChannels.length,
@@ -352,7 +415,7 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 		})) {
 			loadChannels();
 		}
-	}, [filteredChannels.length, loadChannels]);
+	}, [filteredChannels, loadChannels]);
 
 	const renderChannelRow = useCallback(({index, ...rest}) => {
 		const channel = filteredChannels[index];
@@ -369,6 +432,7 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 				<SpottableDiv
 					className={css.channelInfo}
 					onClick={() => onPlayChannel?.(channel)} // eslint-disable-line react/jsx-no-bind
+					onFocus={handleChannelInfoFocus}
 					data-channel-id={channel.Id}
 					data-index={rest['data-index']}
 					spotlightId={`ch-info-${channel.Id}`}
@@ -401,6 +465,7 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 								style={style}
 								isCurrent={isCurrentProgram(program)}
 								onProgramClick={handleProgramClick}
+								onProgramFocus={handleProgramFocus}
 								dataIndex={rest['data-index']}
 							/>
 						);
@@ -408,7 +473,39 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 				</div>
 			</ChannelRowContainer>
 		);
-	}, [filteredChannels, programs, serverUrl, currentTimePosition, calculateProgramStyle, isCurrentProgram, handleProgramClick, onPlayChannel, handleChannelRowFocus]);
+	}, [filteredChannels, programs, serverUrl, currentTimePosition, calculateProgramStyle, isCurrentProgram, handleProgramClick, onPlayChannel, handleChannelRowFocus, handleChannelInfoFocus, handleProgramFocus]);
+
+	useEffect(() => {
+		return () => {
+			const latest = latestStateRef.current;
+			if (!latest) return;
+
+			guideCache.channels = latest.channels;
+			guideCache.programs = latest.programs;
+			guideCache.currentChannelIndex = currentChannelIndexRef.current;
+			guideCache.hasMoreChannels = hasMoreChannelsRef.current;
+			guideCache.showFavoritesOnly = latest.showFavoritesOnly;
+			guideCache.currentDateISO = latest.currentDate.toISOString();
+			guideCache.horizontalScrollLeft = horizontalScrollLeftRef.current;
+		};
+	}, []);
+
+	useEffect(() => {
+		if (didRestoreRef.current || !(guideCache.channels && guideCache.channels.length) || !scrollToRef.current || filteredChannels.length === 0) return;
+
+		const cachedIndex = filteredChannels.findIndex(ch => ch.Id === guideCache.lastFocusedChannelId);
+		const targetIndex = cachedIndex >= 0 ? cachedIndex : Math.min(guideCache.lastFocusedIndex || 0, filteredChannels.length - 1);
+		const target = filteredChannels[targetIndex];
+
+		scrollToRef.current({index: targetIndex, animate: false});
+		horizScrollToRef.current?.({position: {x: guideCache.horizontalScrollLeft || 0}, animate: false});
+
+		setTimeout(() => {
+			if (target) Spotlight.focus(`ch-info-${target.Id}`);
+		}, 50);
+
+		didRestoreRef.current = true;
+	}, [filteredChannels]);
 
 	if (isLoading && channels.length === 0) {
 		return (
@@ -488,6 +585,7 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 						horizontalScrollbar="hidden"
 						verticalScrollbar="hidden"
 						onScroll={handleHorizontalScroll}
+						cbScrollTo={fn => { horizScrollToRef.current = fn; }} // eslint-disable-line react/jsx-no-bind
 					>
 						<div
 							className={css.guideWideSurface}
