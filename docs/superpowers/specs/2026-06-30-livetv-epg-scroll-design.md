@@ -73,31 +73,38 @@ risk — out of scope for fixing this bug.
   computation, the two spacer `<div>`s, and the `channelWindowStartRef >= length`
   reset effect.
 - Map over `filteredChannels` directly to render channel rows.
-- Remove the windowing constants that become dead (`VISIBLE_ROWS`,
-  `OVERSCAN_ROWS`). Keep `CHANNEL_ROW_HEIGHT` only if the quick-jump still needs
-  it (see change 3); if change 3 switches to `offsetTop`, remove it too.
+- Remove the now-dead windowing constants `VISIBLE_ROWS`, `OVERSCAN_ROWS`, and
+  `CHANNEL_ROW_HEIGHT` (change 3 switches the last consumer to `offsetTop`).
 
 ### 2. Decouple "load more" from onScroll alone
 `onScroll` reliability on Tizen is itself suspect, so infinite loading must not
 depend solely on it:
-- **Primary trigger:** when a channel near the end of the loaded list gains focus
-  (e.g. within the last N rows), call `loadChannels()`. This is driven by
-  Spotlight focus, which always fires, rather than by native scroll events.
+- **Primary trigger:** add `onFocusCapture={() => handleChannelRowFocus(index)}`
+  to each `ChannelRowContainer` (LiveTV.js:458, inside the `filteredChannels.map`
+  at :457). React focus **bubbles** from both the `.channelInfo` element and the
+  descendant `ProgramCell`s (:489), so this fires on focus anywhere in the row —
+  no need to add stable `spotlightId`s to program cells. `handleChannelRowFocus`
+  calls `loadChannels()` when `index >= loadedCount - THRESHOLD` (THRESHOLD ≈ 10).
 - **Keep** the existing scroll-position trigger in `handleScroll` as a secondary
-  path (harmless, and covers mouse/pointer scroll).
-- Preserve the existing guards: `hasMoreChannelsRef`, the in-flight/`isLoading`
-  check, and `CHANNELS_PER_BATCH`. Ensure re-entrancy is safe (no duplicate
-  concurrent fetches for the same offset).
+  path (covers pointer/scroll; harmless).
+- **Add a dedicated append in-flight guard.** `isLoading` only wraps the
+  initial/date-reset load (LiveTV.js:150) — it does **not** guard append calls, so
+  the focus trigger and the scroll trigger could fire `loadChannels()`
+  concurrently and both read the same `currentChannelIndexRef.current` (:114),
+  double-appending or skipping a batch. Introduce `isLoadingMoreRef` set at the
+  **top of `loadChannels`** (for non-reset calls) and cleared in a `finally`;
+  bail early if already set. Preserve the existing `hasMoreChannelsRef` and
+  `CHANNELS_PER_BATCH` guards.
 
 ### 3. Fix the row-height mismatch
-Since we no longer use spacer math, `CHANNEL_ROW_HEIGHT`-based pixel math largely
-disappears. For the one remaining consumer — the channel-number quick-jump
-(`handleChannelNumber` sets `guideContent.scrollTop` from `index * CHANNEL_ROW_HEIGHT`) —
-make row height authoritative:
-- Add `box-sizing: border-box` to `.channelRow` so its real height is exactly
-  `80px` (border included), OR compute scroll offset from the actual element via
-  `element.offsetTop`. Prefer `offsetTop` of the target row (robust to any future
-  height change); fall back to `box-sizing: border-box` if simpler.
+Since we no longer use spacer math, `CHANNEL_ROW_HEIGHT`-based pixel math
+disappears. The one remaining consumer is the channel-number quick-jump
+(`handleChannelNumber` at LiveTV.js:173 sets `guideContent.scrollTop` from
+`index * CHANNEL_ROW_HEIGHT`, which drifts because `.channelRow` is `height:80px`
+**plus** a `1px` border under `content-box`, LiveTV.module.less:132). Because all
+loaded rows are now mounted, switch the jump to query the target row element and
+use its **`offsetTop`** — robust to any future height/border change — and delete
+`CHANNEL_ROW_HEIGHT`.
 
 ### 4. Keep the time-header horizontal sync
 `handleScroll` still syncs `timeSlotsRef.scrollLeft = guideContent.scrollLeft`.
@@ -114,11 +121,13 @@ If disabling windowing makes the blank disappear, the diagnosis is confirmed.
 
 ## Testing
 
-- **Unit (TDD where it fits):** the load-more decision is pure logic — extract a
-  small helper `shouldLoadMore({focusedIndex, loadedCount, hasMore, isLoading})`
-  (and/or the scroll-position variant) and unit-test it with jest (the repo's
-  existing test runner). Boundary cases: focus on last row, hasMore false,
-  already loading, empty list.
+- **Unit (optional, TDD where it fits):** the load-more decision is pure logic —
+  optionally extract a thin helper
+  `shouldLoadMore({focusedIndex, loadedCount, hasMore, isLoadingMore, threshold})`
+  and unit-test it with the repo's existing runner. Boundary cases: focus on last
+  row, `hasMore` false, already loading, empty list. Keep it thin — do not
+  overbuild scroll math around it; the authoritative test is on-device d-pad
+  navigation.
 - **End-to-end (authoritative):** build `.wgt`, install via Apps2Samsung, open
   Live TV, and d-pad scroll well past the first page. Confirm: rows keep
   rendering, focus is retained, no blank region, and additional batches load.
@@ -129,13 +138,19 @@ If disabling windowing makes the blank disappear, the diagnosis is confirmed.
 
 ## Build & deploy (no Tizen Studio)
 
-- Node 18+ (local is v24 — watch for build-tool incompatibility; fall back to an
-  LTS Node via nvm if the build breaks).
+- Node 18+ (local is v24). v24 is within the dependency range (`ilib` requires
+  `>=8 <25`), so it should build. If the build tooling fails, fall back to Node
+  20/22 LTS (via nvm) — don't pre-solve this; discover at build time.
 - `npm install` at repo root (npm workspaces).
-- Build + package the Tizen `.wgt` using the repo's `build-wgt.js`
-  `--skip-tizen-cli` **zip fallback** (produces an unsigned `.wgt`). If the `zip`
-  CLI is unavailable on Windows, substitute an equivalent zip step
-  (PowerShell `Compress-Archive` or a Node zip) that yields a byte-valid `.wgt`.
+- Build + package with `npm run build:tizen -- --skip-tizen-cli` (package.json:11),
+  which uses `build-wgt.js`'s **zip fallback** (produces an *unsigned* `.wgt`).
+  **Caveat:** the fallback shells out to an external `zip` binary
+  (build-wgt.js:84) and hard-fails if it's missing (build-wgt.js:463). Windows
+  has no `zip` by default and `Compress-Archive` is **not** substituted
+  automatically. So the build step must first check for `zip`; if absent, either
+  (a) provide a `zip` on PATH, or (b) run an explicit `Compress-Archive` (or Node)
+  step over the built `dist/` to emit a byte-valid `.wgt`. This is a build-time
+  action item, not a code change to the repo.
 - Install the unsigned `.wgt` via **Apps2Samsung**, which handles the developer
   certificate/signing and pushes to the TV.
 
