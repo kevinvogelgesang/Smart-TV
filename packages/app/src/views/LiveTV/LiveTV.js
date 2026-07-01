@@ -46,6 +46,7 @@ const ProgramCell = ({program, channel, style, isCurrent, onProgramClick}) => {
 			onClick={handleClick}
 			onFocus={handleFocus}
 			data-program-id={program.Id}
+			spotlightId={`program-${channel.Id}-${program.Id}`}
 		>
 			<div className={css.programTime}>
 				{new Date(program.StartDate).toLocaleTimeString(undefined, {
