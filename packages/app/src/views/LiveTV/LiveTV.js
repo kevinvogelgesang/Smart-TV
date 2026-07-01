@@ -2,17 +2,18 @@ import {useState, useEffect, useCallback, useRef, useMemo} from 'react';
 import Spottable from '@enact/spotlight/Spottable';
 import SpotlightContainerDecorator from '@enact/spotlight/SpotlightContainerDecorator';
 import Spotlight from '@enact/spotlight';
+import VirtualList from '@enact/sandstone/VirtualList';
 import $L from '@enact/i18n/$L';
 import {useAuth} from '../../context/AuthContext';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import {KEYS} from '../../utils/keys';
+import {shouldLoadMore} from '../../utils/liveTvPaging';
 
 import css from './LiveTV.module.less';
 
 const SpottableDiv = Spottable('div');
 const SpottableButton = Spottable('button');
 const GuideControls = SpotlightContainerDecorator({enterTo: 'last-focused', restrict: 'self-first'}, 'div');
-const ProgramGridContainer = SpotlightContainerDecorator({enterTo: 'last-focused', restrict: 'self-first'}, 'div');
 const ChannelRowContainer = SpotlightContainerDecorator({enterTo: 'last-focused'}, 'div');
 const PopupContainer = SpotlightContainerDecorator({
 	enterTo: 'default-element',
@@ -22,8 +23,8 @@ const PopupContainer = SpotlightContainerDecorator({
 const HOURS_TO_DISPLAY = 6;
 const PIXELS_PER_HOUR = 600;
 const CHANNEL_ROW_HEIGHT = 80;
-const OVERSCAN_ROWS = 6;
-const VISIBLE_ROWS = 16;
+const CHANNEL_COLUMN_WIDTH = 200; // matches @channel-column-width in the .less
+const ROW_HEIGHT = 80;            // matches @row-height (raw px, not ri.scale)
 const MINUTES_PER_PIXEL = 60 / PIXELS_PER_HOUR;
 const CHANNELS_PER_BATCH = 50;
 const GUIDE_CONTROL_IDS = ['prev-day', 'next-day', 'today', 'filter', 'recordings'];
@@ -65,8 +66,6 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 	const {api, serverUrl} = useAuth();
 	const [channels, setChannels] = useState([]);
 	const [programs, setPrograms] = useState({});
-	const [channelWindowStart, setChannelWindowStart] = useState(0);
-	const channelWindowStartRef = useRef(0);
 	const filteredChannelsRef = useRef([]);
 	const [currentDate, setCurrentDate] = useState(new Date());
 	const [isLoading, setIsLoading] = useState(true);
@@ -75,6 +74,8 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 	const [channelNumberBuffer, setChannelNumberBuffer] = useState('');
 
 	const guideContentRef = useRef(null);
+	const guideHorizontalRef = useRef(null);
+	const scrollToRef = useRef(null);
 	const timeSlotsRef = useRef(null);
 	const channelNumberTimeoutRef = useRef(null);
 	const currentChannelIndexRef = useRef(0);
@@ -232,28 +233,12 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 		return () => window.removeEventListener('keydown', handleKeyDown, true);
 	}, [selectedProgram, handleChannelNumber]);
 
-	const handleScroll = useCallback(() => {
-		const guideContent = guideContentRef.current;
-		if (!guideContent) return;
-
-		const scrollPosition = guideContent.scrollTop + guideContent.clientHeight;
-		const scrollHeight = guideContent.scrollHeight;
-
-		if (scrollPosition >= scrollHeight - 500 && hasMoreChannelsRef.current && !isLoading) {
-			loadChannels();
+	const handleHorizontalScroll = useCallback(() => {
+		const scroller = guideHorizontalRef.current;
+		if (scroller && timeSlotsRef.current) {
+			timeSlotsRef.current.scrollLeft = scroller.scrollLeft;
 		}
-
-		const firstVisibleIndex = Math.floor(guideContent.scrollTop / CHANNEL_ROW_HEIGHT);
-		const nextWindowStart = Math.max(0, firstVisibleIndex - OVERSCAN_ROWS);
-		if (nextWindowStart !== channelWindowStartRef.current) {
-			channelWindowStartRef.current = nextWindowStart;
-			setChannelWindowStart(nextWindowStart);
-		}
-
-		if (timeSlotsRef.current) {
-			timeSlotsRef.current.scrollLeft = guideContent.scrollLeft;
-		}
-	}, [loadChannels, isLoading]);
+	}, []);
 
 	const changeDay = useCallback((days) => {
 		setCurrentDate(prev => {
@@ -327,22 +312,6 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 	}, [channels, showFavoritesOnly]);
 	filteredChannelsRef.current = filteredChannels;
 
-	useEffect(() => {
-		if (channelWindowStartRef.current >= filteredChannels.length) {
-			channelWindowStartRef.current = 0;
-			setChannelWindowStart(0);
-			if (guideContentRef.current) guideContentRef.current.scrollTop = 0;
-		}
-	}, [filteredChannels.length]);
-
-	const windowEnd = Math.min(filteredChannels.length, channelWindowStart + VISIBLE_ROWS + OVERSCAN_ROWS * 2);
-	const visibleChannels = useMemo(
-		() => filteredChannels.slice(channelWindowStart, windowEnd),
-		[filteredChannels, channelWindowStart, windowEnd]
-	);
-	const topSpacerHeight = channelWindowStart * CHANNEL_ROW_HEIGHT;
-	const bottomSpacerHeight = Math.max(0, (filteredChannels.length - windowEnd) * CHANNEL_ROW_HEIGHT);
-
 	const calculateProgramStyle = useCallback((program) => {
 		const startTime = getGuideStartTime();
 		const guideEndTime = getGuideEndTime();
@@ -381,6 +350,71 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 		const pos = getCurrentTimePosition();
 		return pos >= 0 && pos <= HOURS_TO_DISPLAY * PIXELS_PER_HOUR ? pos : null;
 	}, [getCurrentTimePosition]);
+
+	const handleChannelRowFocus = useCallback((index) => {
+		if (shouldLoadMore({
+			focusedIndex: index,
+			loadedCount: filteredChannels.length,
+			hasMore: hasMoreChannelsRef.current,
+			isLoadingMore: isLoadingMoreRef.current
+		})) {
+			loadChannels();
+		}
+	}, [filteredChannels.length, loadChannels]);
+
+	const renderChannelRow = useCallback(({index, ...rest}) => {
+		const channel = filteredChannels[index];
+		if (!channel) return null;
+
+		return (
+			<ChannelRowContainer
+				{...rest}
+				className={css.channelRow}
+				data-channel-id={channel.Id}
+				spotlightId={`ch-row-${channel.Id}`}
+				onFocusCapture={() => handleChannelRowFocus(index)} // eslint-disable-line react/jsx-no-bind
+			>
+				<SpottableDiv
+					className={css.channelInfo}
+					onClick={() => onPlayChannel?.(channel)} // eslint-disable-line react/jsx-no-bind
+					data-channel-id={channel.Id}
+					spotlightId={`ch-info-${channel.Id}`}
+				>
+					<div className={css.channelNumber}>{channel.ChannelNumber}</div>
+					<div className={css.channelName}>{channel.Name}</div>
+					{channel.ImageTags?.Primary && (
+						<img
+							className={css.channelLogo}
+							src={`${serverUrl}/Items/${channel.Id}/Images/Primary?maxWidth=120&quality=90`}
+							alt=""
+						/>
+					)}
+				</SpottableDiv>
+				<div
+					className={css.programsContainer}
+					style={{width: `${HOURS_TO_DISPLAY * PIXELS_PER_HOUR}px`}}
+				>
+					{currentTimePosition !== null && (
+						<div className={css.currentTimeIndicator} style={{left: `${currentTimePosition}px`}} />
+					)}
+					{(programs[channel.Id] || []).map(program => {
+						const style = calculateProgramStyle(program);
+						if (!style) return null;
+						return (
+							<ProgramCell
+								key={program.Id}
+								program={program}
+								channel={channel}
+								style={style}
+								isCurrent={isCurrentProgram(program)}
+								onProgramClick={handleProgramClick}
+							/>
+						);
+					})}
+				</div>
+			</ChannelRowContainer>
+		);
+	}, [filteredChannels, programs, serverUrl, currentTimePosition, calculateProgramStyle, isCurrentProgram, handleProgramClick, onPlayChannel, handleChannelRowFocus]);
 
 	if (isLoading && channels.length === 0) {
 		return (
@@ -454,73 +488,34 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 						</div>
 					</div>
 
-					<ProgramGridContainer
-						className={css.guideContent}
-						ref={guideContentRef}
-						onScroll={handleScroll}
-						spotlightId="program-grid"
+					<div
+						className={css.guideHorizontalScroller}
+						ref={guideHorizontalRef}
+						onScroll={handleHorizontalScroll}
 					>
-						{topSpacerHeight > 0 && <div style={{height: `${topSpacerHeight}px`, flexShrink: 0}} />}
-						{visibleChannels.map(channel => (
-							<ChannelRowContainer
-								key={channel.Id}
-								className={css.channelRow}
-								data-channel-id={channel.Id}
-								spotlightId={`ch-row-${channel.Id}`}
-							>
-								<SpottableDiv
-									className={css.channelInfo}
-									onClick={() => onPlayChannel?.(channel)} // eslint-disable-line react/jsx-no-bind
-									data-channel-id={channel.Id}
-								>
-									<div className={css.channelNumber}>{channel.ChannelNumber}</div>
-									<div className={css.channelName}>{channel.Name}</div>
-									{channel.ImageTags?.Primary && (
-										<img
-											className={css.channelLogo}
-											src={`${serverUrl}/Items/${channel.Id}/Images/Primary?maxWidth=120&quality=90`}
-											alt=""
-										/>
-									)}
-								</SpottableDiv>
-								<div
-									className={css.programsContainer}
-									style={{width: `${HOURS_TO_DISPLAY * PIXELS_PER_HOUR}px`}}
-								>
-									{currentTimePosition !== null && (
-										<div
-											className={css.currentTimeIndicator}
-											style={{left: `${currentTimePosition}px`}}
-										/>
-									)}
-									{(programs[channel.Id] || []).map(program => {
-										const style = calculateProgramStyle(program);
-										if (!style) return null;
-
-										const isCurrent = isCurrentProgram(program);
-
-										return (
-											<ProgramCell
-												key={program.Id}
-												program={program}
-												channel={channel}
-												style={style}
-												isCurrent={isCurrent}
-												onProgramClick={handleProgramClick}
-											/>
-										);
-									})}
+						<div
+							className={css.guideWideSurface}
+							style={{width: `${CHANNEL_COLUMN_WIDTH + HOURS_TO_DISPLAY * PIXELS_PER_HOUR}px`}}
+						>
+							{filteredChannels.length === 0 ? (
+								<div className={css.empty}>
+									{showFavoritesOnly ? $L('No favorite channels') : $L('No channels available')}
 								</div>
-							</ChannelRowContainer>
-						))}
-						{bottomSpacerHeight > 0 && <div style={{height: `${bottomSpacerHeight}px`, flexShrink: 0}} />}
-
-						{filteredChannels.length === 0 && (
-							<div className={css.empty}>
-								{showFavoritesOnly ? $L('No favorite channels') : $L('No channels available')}
-							</div>
-						)}
-					</ProgramGridContainer>
+							) : (
+								<VirtualList
+									className={css.channelVirtualList}
+									dataSize={filteredChannels.length}
+									itemSize={ROW_HEIGHT}
+									itemRenderer={renderChannelRow}
+									direction="vertical"
+									horizontalScrollbar="hidden"
+									verticalScrollbar="auto"
+									spotlightId="program-grid"
+									cbScrollTo={fn => { scrollToRef.current = fn; }}
+								/>
+							)}
+						</div>
+					</div>
 				</div>
 			</div>
 
