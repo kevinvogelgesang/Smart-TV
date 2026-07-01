@@ -511,7 +511,7 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 									horizontalScrollbar="hidden"
 									verticalScrollbar="auto"
 									spotlightId="program-grid"
-									cbScrollTo={fn => { scrollToRef.current = fn; }}
+									cbScrollTo={fn => { scrollToRef.current = fn; }} // eslint-disable-line react/jsx-no-bind
 								/>
 							)}
 						</div>
