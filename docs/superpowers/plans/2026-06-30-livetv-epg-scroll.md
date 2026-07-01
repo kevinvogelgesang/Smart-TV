@@ -15,7 +15,7 @@
 - **Match existing file style:** tab indentation, single quotes, semicolons, `useCallback`/`useRef` patterns already in `LiveTV.js`.
 - **Node 18+** (local v24 is within the `ilib >=8 <25` range and should build; if build tooling fails, use Node 20/22 LTS via nvm).
 - **Build the `.wgt` without Tizen Studio:** `npm run build:tizen -- --skip-tizen-cli` (unsigned zip fallback). `zip` is **not** on this Windows PATH, so the fallback (`build-wgt.js:86`) will fail — supply a `zip` binary or run an explicit `Compress-Archive` substitute over the built output to emit a valid `.wgt`. Install via **Apps2Samsung** (handles dev-cert signing + push to TV).
-- **Commit after every task.** Author: `Kevin Vogelgesang <kevin@enrollmentresources.com>`.
+- **Commit after every task.** Before each commit run `git status` and stage **only** the files that task touched (the tree may already be dirty from build artifacts/logs — never blind `git add -A` except the final housekeeping commit). Author: `Kevin Vogelgesang <kevin@enrollmentresources.com>`.
 
 ---
 
@@ -60,8 +60,8 @@ describe('shouldLoadMore', () => {
 		expect(shouldLoadMore({...base, focusedIndex: 40, loadedCount: 50, threshold: 10})).toBe(true);
 	});
 
-	test('handles an empty list without loading', () => {
-		expect(shouldLoadMore({focusedIndex: 0, loadedCount: 0, hasMore: true, isLoadingMore: false})).toBe(true);
+	test('does not load for an empty mounted list', () => {
+		expect(shouldLoadMore({focusedIndex: 0, loadedCount: 0, hasMore: true, isLoadingMore: false})).toBe(false);
 	});
 
 	test('respects a custom threshold', () => {
@@ -71,7 +71,7 @@ describe('shouldLoadMore', () => {
 });
 ```
 
-Note on the empty-list case: `focusedIndex 0 >= 0 - 10` is `true`; with `hasMore true` this correctly triggers the very first load-more probe (harmless — the in-flight guard and `hasMore` handle the rest).
+Note on the empty-list case: an empty mounted list must **not** trigger a load probe from `shouldLoadMore` (the initial load is owned by the mount effect, not this helper), so the implementation short-circuits when `loadedCount <= 0`.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -96,6 +96,7 @@ Create `packages/app/src/utils/liveTvPaging.js`:
  */
 export const shouldLoadMore = ({focusedIndex, loadedCount, hasMore, isLoadingMore, threshold = 10}) => {
 	if (!hasMore || isLoadingMore) return false;
+	if (loadedCount <= 0) return false;
 	return focusedIndex >= loadedCount - threshold;
 };
 ```
@@ -134,10 +135,12 @@ Next to the other refs (after `const hasMoreChannelsRef = useRef(true);`, ~line 
 
 - [ ] **Step 2: Guard the append path in `loadChannels`**
 
-Replace the top of `loadChannels` (the `if (reset) {...}` block through the `if (!hasMoreChannelsRef.current) return;` line, ~lines 103–111) with:
+Replace the top of `loadChannels` (the `if (reset) {...}` block through the `if (!hasMoreChannelsRef.current) return;` line, ~lines 103–111) with. Note the guard is set **only for append calls** (`isAppend`), so a `reset` load never touches the append guard:
 
 ```javascript
 	const loadChannels = useCallback(async (reset = false) => {
+		const isAppend = !reset;
+
 		if (reset) {
 			currentChannelIndexRef.current = 0;
 			hasMoreChannelsRef.current = true;
@@ -146,22 +149,24 @@ Replace the top of `loadChannels` (the `if (reset) {...}` block through the `if 
 		}
 
 		if (!hasMoreChannelsRef.current) return;
-		if (!reset && isLoadingMoreRef.current) return;
-		if (!reset) isLoadingMoreRef.current = true;
+		if (isAppend && isLoadingMoreRef.current) return;
+		if (isAppend) isLoadingMoreRef.current = true;
 ```
 
-- [ ] **Step 3: Clear the guard in a `finally`**
+- [ ] **Step 3: Clear the guard in a `finally` (append calls only)**
 
-The existing body ends with a `try { ... } catch (err) { console.error('Failed to load channels:', err); }` (~lines 113–147). Add a `finally` that clears the guard:
+The existing body ends with a `try { ... } catch (err) { console.error('Failed to load channels:', err); }` (~lines 113–147). Add a `finally` that clears the guard **only when it was an append**, so a concurrent `reset` cannot wipe an append's in-flight flag:
 
 ```javascript
 		} catch (err) {
 			console.error('Failed to load channels:', err);
 		} finally {
-			isLoadingMoreRef.current = false;
+			if (isAppend) isLoadingMoreRef.current = false;
 		}
 	}, [api, getGuideStartTime, getGuideEndTime]);
 ```
+
+> Optional hardening (not required for a personal build): add a monotonically-increasing "generation" ref bumped on every `reset`, capture it at the top of an append, and discard the append's results if the generation changed before it resolved — prevents a slow append from appending stale channels after a day/filter switch.
 
 - [ ] **Step 4: Lint**
 
@@ -384,7 +389,7 @@ In `handleChannelNumber`, replace the block that sets `guideContent.scrollTop` (
 			if (channelIndex >= 0) {
 				const channel = filteredChannelsRef.current[channelIndex];
 				const guideContent = guideContentRef.current;
-				const row = document.querySelector(`[data-channel-id="${channel.Id}"]`);
+				const row = document.querySelector(`.${css.channelRow}[data-channel-id="${channel.Id}"]`);
 				if (guideContent && row) {
 					guideContent.scrollTop = Math.max(0, row.offsetTop - guideContent.clientHeight / 2);
 				}
@@ -395,7 +400,7 @@ In `handleChannelNumber`, replace the block that sets `guideContent.scrollTop` (
 			}
 ```
 
-(Note: `[data-channel-id]` matches both the row container and the inner `channelInfo`; `querySelector` returns the first — the `ChannelRowContainer` — whose `offsetTop` is what we want.)
+(Both the `ChannelRowContainer` **and** the inner `channelInfo` carry `data-channel-id`. Qualifying the selector with `.${css.channelRow}` guarantees we match the row container — whose `offsetTop` relative to the `position: relative` `.guideContent` is what we scroll to — not the inner element.)
 
 - [ ] **Step 2: Delete the `CHANNEL_ROW_HEIGHT` constant**
 
@@ -443,14 +448,23 @@ Expected: app bundles and the script attempts the zip fallback.
 
 - [ ] **Step 3: Handle the missing `zip` binary**
 
-`zip` is not on this Windows PATH, so Step 2's fallback (`packages/build-tizen/scripts/build-wgt.js:86`) will report failure to create the `.wgt`. Produce the `.wgt` from the built output directory instead. Identify the build output dir the script zips (the `srcDir` passed to `zipDirToFile` — typically the packaged app dir under `packages/build-tizen`), then, in PowerShell, from inside that directory:
+`zip` is not on this Windows PATH, so Step 2's fallback (`packages/build-tizen/scripts/build-wgt.js:86`) will report failure to create the `.wgt`. Produce the `.wgt` from the built output directory instead. The script zips the **`DIST` directory** = `packages/build-tizen/dist` (`build-wgt.js:23`, via `zipDirToFile(DIST, finalWgt)` at `:463`), into which it has already copied `config.xml` (`:380`), `index.html`, `main.js`, resources, and icons. So archive the **contents** of that dir (not the folder itself). From repo root in PowerShell:
 
 ```powershell
-Compress-Archive -Path * -DestinationPath ..\Moonfin.zip -Force
-Move-Item ..\Moonfin.zip ..\Moonfin.wgt -Force
+Set-Location packages\build-tizen\dist
+Compress-Archive -Path * -DestinationPath ..\..\..\Moonfin_Tizen_Regular_2.6.0.wgt -Force
+Set-Location ..\..\..
 ```
 
-The `.wgt` must contain `config.xml` at its root (verify: `Expand-Archive -Path Moonfin.wgt -DestinationPath _check` then confirm `config.xml` is at top level). If it is nested, re-zip from the correct directory. (Alternative: install a `zip` binary — e.g. via `winget install GnuWin32.Zip` or Git's `usr/bin` — and re-run Step 2; then this step is unnecessary.)
+Then confirm the archive root is correct (files at top level, **not** nested under `dist/`):
+
+```powershell
+Expand-Archive -Path Moonfin_Tizen_Regular_2.6.0.wgt -DestinationPath _wgtcheck -Force
+Get-ChildItem _wgtcheck   # must list config.xml, index.html, main.js, resources, icons directly
+Remove-Item _wgtcheck -Recurse -Force
+```
+
+A plain zip is exactly what the script's own fallback produces, and Apps2Samsung handles signing; no special `mimetype`/signature file is needed on this path. (Alternative: install a `zip` binary — e.g. `winget install GnuWin32.Zip`, or use Git's bundled `usr\bin\zip.exe` — put it on PATH and re-run Step 2; then this manual step is unnecessary.)
 
 - [ ] **Step 4: Install via Apps2Samsung**
 
