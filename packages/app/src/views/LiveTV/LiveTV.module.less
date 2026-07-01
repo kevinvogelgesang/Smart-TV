@@ -129,9 +129,28 @@
 	position: relative;
 }
 
+.guideHorizontalScroller {
+	flex: 1;
+	min-height: 0; // flex children refuse to shrink without this → VirtualList height would collapse
+	overflow-x: auto;
+	overflow-y: hidden;
+	position: relative;
+}
+
+.guideWideSurface {
+	height: 100%;
+	min-height: 0;
+}
+
+.channelVirtualList {
+	width: 100%;
+	height: 100%;
+}
+
 .channelRow {
 	display: flex;
 	height: @row-height;
+	box-sizing: border-box;
 	border-bottom: 1px solid @border-color;
 
 	&:last-child {
