@@ -3,6 +3,7 @@ import * as jellyfinApi from '../services/jellyfinApi';
 import {initStorage, getFromStorage, saveToStorage, removeFromStorage} from '../services/storage';
 import * as multiServerManager from '../services/multiServerManager';
 import {clearImageCache} from '../services/imageProxy';
+import {SEED_CREDENTIALS} from '../config/localCredentials';
 
 const REVALIDATE_INTERVAL = 5 * 60 * 1000;
 const BACKOFF_DELAYS = [5000, 10000, 20000];
@@ -189,6 +190,19 @@ export const AuthProvider = ({children}) => {
 
 		return {...result, serverResult};
 	}, [loadServers]);
+
+	const seedLoginTriedRef = useRef(false);
+	useEffect(() => {
+		if (isLoading || isAuthenticated || seedLoginTriedRef.current) return;
+		if (!SEED_CREDENTIALS.serverUrl || !SEED_CREDENTIALS.username) return;
+		seedLoginTriedRef.current = true;
+		login(
+			SEED_CREDENTIALS.serverUrl,
+			SEED_CREDENTIALS.username,
+			SEED_CREDENTIALS.password,
+			SEED_CREDENTIALS.serverName ? {serverName: SEED_CREDENTIALS.serverName} : {}
+		).catch(e => console.warn('[AUTH] Seed auto-login failed:', e));
+	}, [isLoading, isAuthenticated, login]);
 
 	const loginWithToken = useCallback(async (server, authResult, options = {}) => {
 		const {serverName: sName, serverType: sType = 'jellyfin', isAddingNewServer = false, switchToNewUser = true} = options;
