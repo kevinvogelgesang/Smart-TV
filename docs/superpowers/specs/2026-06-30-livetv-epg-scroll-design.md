@@ -51,9 +51,12 @@ Replace the hand-rolled windowing with Enact `VirtualList`
 axes** so `VirtualList` only ever handles fixed-height vertical rows:
 
 - **Vertical (channels):** `VirtualList` owns it. `dataSize =
-  filteredChannels.length`, `itemSize = ri.scale(80)`, `direction="vertical"`,
-  `spotlightId="program-grid"`. Its `itemRenderer({index})` renders exactly one
-  channel row (the existing row body).
+  filteredChannels.length`, `itemSize={80}` (**raw px** — LiveTV uses raw px, not
+  `ri.scale`, so this matches `.channelRow`'s CSS height), `direction="vertical"`,
+  `horizontalScrollbar="hidden"` (horizontal scroll belongs to the wrapper),
+  `spotlightId="program-grid"`. Its `itemRenderer({index, ...rest})` renders one
+  channel row and **must spread `rest`** onto the row root (Sandstone injects
+  `data-index` there, used for Spotlight restoration + index scroll/focus).
 - **Horizontal (time):** a wrapper *outside* `VirtualList` owns it —
   `.guideHorizontalScroller` (`overflow-x: auto; overflow-y: hidden; flex: 1`)
   containing a wide surface (`width: channelColumnWidth + HOURS_TO_DISPLAY *
@@ -117,11 +120,13 @@ The old `scrollTop = index * CHANNEL_ROW_HEIGHT` cannot target a `VirtualList`.
 Use `VirtualList`'s official scroll-to callback (confirmed present in installed
 `@enact/sandstone` **2.9.13**, `VirtualList.js:135–164`):
 - Set `cbScrollTo={fn => { scrollToRef.current = fn; }}` on the list.
-- On a channel-number match, call
-  `scrollToRef.current({index: channelIndex, animate: false, focus: true})`.
-  The `focus: true` option makes VirtualList focus the item after scrolling, so
-  no manual `.focus()` is needed (the `setTimeout`/`querySelector` focus dance is
-  removed). `scrollTo` accepts exactly one of `position`/`align`/`index`/`node`.
+- On a channel-number match, `scrollToRef.current({index: channelIndex,
+  animate: false})`, then focus the inner channel element by spotlightId with a
+  short retry (VirtualList's own `focus:true` targets the item node it tracks by
+  `data-index` — the row *container*, a Spotlight container, not the spottable
+  channel-info — so drive focus explicitly): `Spotlight.focus(`ch-info-${id}`)`,
+  retrying every 50ms up to ~5 times because the target item may not be mounted
+  the instant `scrollTo` is called.
 - Delete `CHANNEL_ROW_HEIGHT` (no longer used).
 
 ### 6. Remove dead windowing code
