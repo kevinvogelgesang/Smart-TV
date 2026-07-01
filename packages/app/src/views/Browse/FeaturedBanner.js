@@ -12,7 +12,8 @@ import css from './Browse.module.less';
 
 const FEATURED_GENRES_LIMIT = 3;
 const PRELOAD_ADJACENT_SLIDES = 2;
-const TRAILER_REVEAL_MS = 4000;
+const TRAILER_REVEAL_MS = 0;
+const TRAILER_START_DELAY_MS = 10000;
 const LOCAL_TRAILER_STREAM_PARAMS = {
 	Static: 'false',
 	videoCodec: 'h264',
@@ -42,6 +43,7 @@ const FeaturedBanner = memo(({
 }) => {
 	const [currentIndex, setCurrentIndex] = useState(0);
 	const [trailerActive, setTrailerActive] = useState(false);
+	const [trailerPending, setTrailerPending] = useState(false);
 	const [featuredFocused, setFeaturedFocused] = useState(false);
 	const [screensaverActive, setScreensaverActive] = useState(false);
 
@@ -52,6 +54,7 @@ const FeaturedBanner = memo(({
 	const trailerStateRef = useRef('idle');
 	const trailerVideoIdRef = useRef(null);
 	const trailerRevealTimerRef = useRef(null);
+	const trailerStartTimerRef = useRef(null);
 	const sponsorSegmentsRef = useRef([]);
 	const carouselIntervalRef = useRef(null);
 
@@ -104,12 +107,12 @@ const FeaturedBanner = memo(({
 		const carouselSpeed = Number.isFinite(configuredInterval) && configuredInterval > 0
 			? configuredInterval * 1000
 			: (settings.carouselSpeed || 8000);
-		if (!autoAdvanceEnabled || !isVisible || featuredItems.length <= 1 || !featuredFocused || carouselSpeed <= 0 || trailerActive) return;
+		if (!autoAdvanceEnabled || !isVisible || featuredItems.length <= 1 || !featuredFocused || carouselSpeed <= 0 || trailerActive || trailerPending) return;
 
 		carouselIntervalRef.current = setInterval(() => {
 			setCurrentIndex((prev) => (prev + 1) % featuredItems.length);
 		}, carouselSpeed);
-	}, [isVisible, featuredItems.length, featuredFocused, settings.autoAdvance, settings.autoAdvanceInterval, settings.carouselSpeed, trailerActive]);
+	}, [isVisible, featuredItems.length, featuredFocused, settings.autoAdvance, settings.autoAdvanceInterval, settings.carouselSpeed, trailerActive, trailerPending]);
 
 	useEffect(() => {
 		const autoAdvanceEnabled = settings.autoAdvance !== false;
@@ -117,7 +120,7 @@ const FeaturedBanner = memo(({
 		const carouselSpeed = Number.isFinite(configuredInterval) && configuredInterval > 0
 			? configuredInterval * 1000
 			: (settings.carouselSpeed || 8000);
-		if (!autoAdvanceEnabled || !isVisible || featuredItems.length <= 1 || !featuredFocused || carouselSpeed <= 0 || trailerActive) return;
+		if (!autoAdvanceEnabled || !isVisible || featuredItems.length <= 1 || !featuredFocused || carouselSpeed <= 0 || trailerActive || trailerPending) return;
 		startCarouselTimer();
 		return () => {
 			if (carouselIntervalRef.current) {
@@ -125,9 +128,13 @@ const FeaturedBanner = memo(({
 				carouselIntervalRef.current = null;
 			}
 		};
-	}, [isVisible, featuredItems.length, featuredFocused, settings.autoAdvance, settings.autoAdvanceInterval, settings.carouselSpeed, trailerActive, startCarouselTimer]);
+	}, [isVisible, featuredItems.length, featuredFocused, settings.autoAdvance, settings.autoAdvanceInterval, settings.carouselSpeed, trailerActive, trailerPending, startCarouselTimer]);
 
 	const stopTrailer = useCallback(() => {
+		if (trailerStartTimerRef.current) {
+			clearTimeout(trailerStartTimerRef.current);
+			trailerStartTimerRef.current = null;
+		}
 		if (trailerRevealTimerRef.current) {
 			clearTimeout(trailerRevealTimerRef.current);
 			trailerRevealTimerRef.current = null;
@@ -137,6 +144,7 @@ const FeaturedBanner = memo(({
 			trailerSkipIntervalRef.current = null;
 		}
 		setTrailerActive(false);
+		setTrailerPending(false);
 		const video = trailerVideoRef.current;
 		if (video) {
 			try { video.pause(); } catch (e) { /* ignore */ }
@@ -364,7 +372,12 @@ const FeaturedBanner = memo(({
 			}
 		};
 
-		resolveAndStartTrailer();
+		setTrailerPending(true);
+		trailerStartTimerRef.current = setTimeout(() => {
+			trailerStartTimerRef.current = null;
+			setTrailerPending(false);
+			resolveAndStartTrailer();
+		}, TRAILER_START_DELAY_MS);
 
 		return () => {
 			cancelled = true;

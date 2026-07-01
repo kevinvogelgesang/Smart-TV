@@ -28,6 +28,7 @@ const ROW_HEIGHT = 80;            // matches @row-height (raw px, not ri.scale)
 const MINUTES_PER_PIXEL = 60 / PIXELS_PER_HOUR;
 const CHANNELS_PER_BATCH = 50;
 const GUIDE_CONTROL_IDS = ['prev-day', 'next-day', 'today', 'filter', 'recordings'];
+const FOCUSED_ROW_BOTTOM_LEAD = ROW_HEIGHT + 48; // one row + affordance
 
 const guideCache = {
 	channels: null,
@@ -403,7 +404,18 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 		return pos >= 0 && pos <= HOURS_TO_DISPLAY * PIXELS_PER_HOUR ? pos : null;
 	}, [getCurrentTimePosition]);
 
-	const handleChannelRowFocus = useCallback((index) => {
+	const nudgeFocusedRowIntoView = useCallback((index, rowNode) => {
+		if (!scrollToRef.current || !rowNode) return;
+		const listNode = rowNode.closest(`.${css.channelVirtualList}`);
+		if (!listNode) return;
+		const rowRect = rowNode.getBoundingClientRect();
+		const listRect = listNode.getBoundingClientRect();
+		if (rowRect.bottom > listRect.bottom - FOCUSED_ROW_BOTTOM_LEAD) {
+			scrollToRef.current({index, stickTo: 'end', offset: FOCUSED_ROW_BOTTOM_LEAD, disallowNegativeOffset: true, animate: false});
+		}
+	}, []);
+
+	const handleChannelRowFocus = useCallback((index, e) => {
 		guideCache.lastFocusedIndex = index;
 		guideCache.lastFocusedChannelId = filteredChannels[index]?.Id || null;
 
@@ -415,7 +427,10 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 		})) {
 			loadChannels();
 		}
-	}, [filteredChannels, loadChannels]);
+
+		const rowNode = e?.currentTarget;
+		window.requestAnimationFrame(() => nudgeFocusedRowIntoView(index, rowNode));
+	}, [filteredChannels, loadChannels, nudgeFocusedRowIntoView]);
 
 	const renderChannelRow = useCallback(({index, ...rest}) => {
 		const channel = filteredChannels[index];
@@ -427,7 +442,7 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 				className={css.channelRow}
 				data-channel-id={channel.Id}
 				spotlightId={`ch-row-${channel.Id}`}
-				onFocusCapture={() => handleChannelRowFocus(index)} // eslint-disable-line react/jsx-no-bind
+				onFocusCapture={(e) => handleChannelRowFocus(index, e)} // eslint-disable-line react/jsx-no-bind
 			>
 				<SpottableDiv
 					className={css.channelInfo}

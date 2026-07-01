@@ -147,6 +147,9 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 	const lastFocusedElementRef = useRef(null);
 	const timeUpdateIntervalRef = useRef(null);
 	const avplayReadyRef = useRef(false);
+	// [livetune] diagnostic timing anchor - marks loadMedia start for a live tune
+	const liveTuneStartRef = useRef(0);
+	const liveTuneFirstFrameLoggedRef = useRef(false);
 	// Refs for stable callbacks inside AVPlay listener (avoids stale closures)
 	const handleEndedCallbackRef = useRef(null);
 	const handleErrorCallbackRef = useRef(null);
@@ -494,6 +497,11 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 	// ==============================
 	useEffect(() => {
 		const loadMedia = async () => {
+			if (isLiveTV) {
+				liveTuneStartRef.current = performance.now();
+				liveTuneFirstFrameLoggedRef.current = false;
+				console.log('[livetune] loadMedia start +0ms', Date.now());
+			}
 			setIsLoading(true);
 			setError(null);
 			setSubtitleTrackEvents(null);
@@ -511,6 +519,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 				const savedPosition = isLiveTV ? 0 : (item.UserData?.PlaybackPositionTicks || 0);
 				const startPosition = initialStartPositionTicks != null ? initialStartPositionTicks : ((!isLiveTV && resume !== false) ? savedPosition : 0);
 				const effectiveBitrate = selectedQuality || settings.maxBitrate || undefined;
+				if (isLiveTV) console.log(`[livetune] getPlaybackInfo start +${Math.round(performance.now() - liveTuneStartRef.current)}ms`);
 				const result = await playback.getPlaybackInfo(item.Id, {
 					startPositionTicks: startPosition,
 					maxBitrate: effectiveBitrate,
@@ -522,6 +531,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 					isLiveTV,
 					stereoUpmixEnabled: settings.stereoUpmixEnabled
 				});
+				if (isLiveTV) console.log(`[livetune] getPlaybackInfo done +${Math.round(performance.now() - liveTuneStartRef.current)}ms`);
 
 				setPlayMethod(result.playMethod);
 				setMediaSourceId(result.mediaSourceId);
@@ -755,7 +765,9 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 				// === Start AVPlay ===
 				console.log('[Player] avplayOpen URL:', result.url);
 				console.log('[Player] playMethod:', result.playMethod, 'mimeType:', result.mimeType, 'container:', result.mediaSource?.Container, 'transcodingContainer:', result.mediaSource?.TranscodingContainer);
+				if (isLiveTV) console.log(`[livetune] avplayOpen start +${Math.round(performance.now() - liveTuneStartRef.current)}ms`);
 				avplayOpen(result.url);
+				if (isLiveTV) console.log(`[livetune] avplayOpen done +${Math.round(performance.now() - liveTuneStartRef.current)}ms`);
 				applyDisplayWindow();
 
 				// Samsung AVPlay rejects some Jellyfin transcode endpoints with the
@@ -788,7 +800,13 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 
 				avplaySetListener({
 					onbufferingstart: () => { setIsBuffering(true); },
-					onbufferingcomplete: () => { setIsBuffering(false); },
+					onbufferingcomplete: () => {
+						setIsBuffering(false);
+						if (isLiveTV && !liveTuneFirstFrameLoggedRef.current) {
+							liveTuneFirstFrameLoggedRef.current = true;
+							console.log(`[livetune] first bufferingcomplete +${Math.round(performance.now() - liveTuneStartRef.current)}ms`);
+						}
+					},
 					onstreamcompleted: () => { handleEndedCallbackRef.current?.(); },
 					onerror: (eventType) => {
 						console.error('[Player] AVPlay error:', eventType);
@@ -804,6 +822,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 
 				const prepareTimeout = isLiveTV ? 30000 : 60000;
 				let prepareTimer;
+				if (isLiveTV) console.log(`[livetune] avplayPrepare start +${Math.round(performance.now() - liveTuneStartRef.current)}ms`);
 				await Promise.race([
 					avplayPrepare(),
 					new Promise((_, reject) => {
@@ -812,6 +831,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 				]);
 				clearTimeout(prepareTimer);
 				avplayReadyRef.current = true;
+				if (isLiveTV) console.log(`[livetune] avplayPrepare resolved +${Math.round(performance.now() - liveTuneStartRef.current)}ms`);
 
 				// Get duration from AVPlay (returns ms)
 				const durationMs = avplayGetDuration();
@@ -835,10 +855,13 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 				}
 
 				// Play - must be called BEFORE setSelectTrack, which requires PLAYING or PAUSED state
-				const startDelayMs = Math.max(0, Number(settings.videoStartDelay || 0) * 1000);
+				// Live TV skips the configured start delay entirely - it exists to let
+				// buffering settle for VOD, but only adds latency to channel changes.
+				const startDelayMs = isLiveTV ? 0 : Math.max(0, Number(settings.videoStartDelay || 0) * 1000);
 				if (startDelayMs > 0) {
 					await new Promise((resolve) => setTimeout(resolve, startDelayMs));
 				}
+				if (isLiveTV) console.log(`[livetune] avplayPlay +${Math.round(performance.now() - liveTuneStartRef.current)}ms`);
 				avplayPlay();
 				setIsPaused(false);
 

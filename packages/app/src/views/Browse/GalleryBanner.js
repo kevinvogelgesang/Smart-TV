@@ -16,7 +16,8 @@ const GALLERY_CAST_LIMIT = 5;
 const PAGE_SIZE = 5;
 const BACKDROP_OPTS = {maxWidth: 1000, quality: 80};
 const DETAIL_FETCH_DELAY = 350;
-const TRAILER_REVEAL_MS = 4000;
+const TRAILER_REVEAL_MS = 0;
+const TRAILER_START_DELAY_MS = 10000;
 const LOCAL_TRAILER_STREAM_PARAMS = {
 	Static: 'false',
 	videoCodec: 'h264',
@@ -47,6 +48,7 @@ const GalleryBanner = memo(({
 	const [featuredFocused, setFeaturedFocused] = useState(false);
 	const [activeDetail, setActiveDetail] = useState(null);
 	const [trailerActive, setTrailerActive] = useState(false);
+	const [trailerPending, setTrailerPending] = useState(false);
 	const [screensaverActive, setScreensaverActive] = useState(false);
 
 	const carouselIntervalRef = useRef(null);
@@ -57,6 +59,7 @@ const GalleryBanner = memo(({
 	const trailerStateRef = useRef('idle');
 	const trailerVideoIdRef = useRef(null);
 	const trailerRevealTimerRef = useRef(null);
+	const trailerStartTimerRef = useRef(null);
 	const sponsorSegmentsRef = useRef([]);
 
 	const safeIndex = Math.min(activeIndex, Math.max(0, featuredItems.length - 1));
@@ -120,6 +123,10 @@ const GalleryBanner = memo(({
 	}, [currentFeatured, api]);
 
 	const stopTrailer = useCallback(() => {
+		if (trailerStartTimerRef.current) {
+			clearTimeout(trailerStartTimerRef.current);
+			trailerStartTimerRef.current = null;
+		}
 		if (trailerRevealTimerRef.current) {
 			clearTimeout(trailerRevealTimerRef.current);
 			trailerRevealTimerRef.current = null;
@@ -129,6 +136,7 @@ const GalleryBanner = memo(({
 			trailerSkipIntervalRef.current = null;
 		}
 		setTrailerActive(false);
+		setTrailerPending(false);
 		const video = trailerVideoRef.current;
 		if (video) {
 			try { video.pause(); } catch (e) { /* ignore */ }
@@ -355,7 +363,12 @@ const GalleryBanner = memo(({
 			}
 		};
 
-		resolveAndStartTrailer();
+		setTrailerPending(true);
+		trailerStartTimerRef.current = setTimeout(() => {
+			trailerStartTimerRef.current = null;
+			setTrailerPending(false);
+			resolveAndStartTrailer();
+		}, TRAILER_START_DELAY_MS);
 
 		return () => {
 			cancelled = true;
@@ -392,12 +405,12 @@ const GalleryBanner = memo(({
 		const carouselSpeed = Number.isFinite(configuredInterval) && configuredInterval > 0
 			? configuredInterval * 1000
 			: (settings.carouselSpeed || 8000);
-		if (!autoAdvanceEnabled || !isVisible || featuredItems.length <= 1 || !featuredFocused || carouselSpeed <= 0 || trailerActive) return;
+		if (!autoAdvanceEnabled || !isVisible || featuredItems.length <= 1 || !featuredFocused || carouselSpeed <= 0 || trailerActive || trailerPending) return;
 
 		carouselIntervalRef.current = setInterval(() => {
 			setActiveIndex((prev) => (prev + 1) % featuredItems.length);
 		}, carouselSpeed);
-	}, [isVisible, featuredItems.length, featuredFocused, settings.autoAdvance, settings.autoAdvanceInterval, settings.carouselSpeed, trailerActive]);
+	}, [isVisible, featuredItems.length, featuredFocused, settings.autoAdvance, settings.autoAdvanceInterval, settings.carouselSpeed, trailerActive, trailerPending]);
 
 	useEffect(() => {
 		startCarouselTimer();
