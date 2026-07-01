@@ -79,6 +79,7 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 	const channelNumberTimeoutRef = useRef(null);
 	const currentChannelIndexRef = useRef(0);
 	const hasMoreChannelsRef = useRef(true);
+	const isLoadingMoreRef = useRef(false);
 
 	const getGuideStartTime = useCallback(() => {
 		const start = new Date(currentDate);
@@ -101,6 +102,8 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 	}, [getGuideStartTime]);
 
 	const loadChannels = useCallback(async (reset = false) => {
+		const isAppend = !reset;
+
 		if (reset) {
 			currentChannelIndexRef.current = 0;
 			hasMoreChannelsRef.current = true;
@@ -109,6 +112,8 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 		}
 
 		if (!hasMoreChannelsRef.current) return;
+		if (isAppend && isLoadingMoreRef.current) return;
+		if (isAppend) isLoadingMoreRef.current = true;
 
 		try {
 			const result = await api.getLiveTvChannels(currentChannelIndexRef.current, CHANNELS_PER_BATCH);
@@ -144,6 +149,8 @@ const LiveTV = ({onPlayChannel, onRecordings, backHandlerRef}) => {
 			}
 		} catch (err) {
 			console.error('Failed to load channels:', err);
+		} finally {
+			if (isAppend) isLoadingMoreRef.current = false;
 		}
 	}, [api, getGuideStartTime, getGuideEndTime]);
 
