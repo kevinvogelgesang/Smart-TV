@@ -154,6 +154,7 @@ git commit -m "fix(livetv): guard against concurrent channel append fetches"
 ```less
 .guideHorizontalScroller {
 	flex: 1;
+	min-height: 0; // flex children refuse to shrink without this → VirtualList height would collapse
 	overflow-x: auto;
 	overflow-y: hidden;
 	position: relative;
@@ -161,6 +162,7 @@ git commit -m "fix(livetv): guard against concurrent channel append fetches"
 
 .guideWideSurface {
 	height: 100%;
+	min-height: 0;
 }
 
 .channelVirtualList {
@@ -205,10 +207,11 @@ The core structural change. Extract the row body into `renderChannelRow({index})
 - Consumes: `filteredChannels`, `programs`, `serverUrl`, `calculateProgramStyle`, `isCurrentProgram`, `currentTimePosition`, `handleProgramClick`, `onPlayChannel`.
 - Produces: `renderChannelRow` itemRenderer; `guideHorizontalRef`; `scrollToRef` (for Task 7).
 
-- [ ] **Step 1: Add imports** — with the other imports (top of file):
+- [ ] **Step 1: Add imports** — with the other imports (top of file). (`Spotlight` is already imported at line 4; used by Task 6.)
 
 ```javascript
 import VirtualList from '@enact/sandstone/VirtualList';
+import {shouldLoadMore} from '../../utils/liveTvPaging';
 ```
 
 - [ ] **Step 2: Add constants + refs** — near the existing constants (~line 22) add the channel column width, and remove the windowing constants (`VISIBLE_ROWS`, `OVERSCAN_ROWS`; `CHANNEL_ROW_HEIGHT` is removed in Task 7):
@@ -243,7 +246,22 @@ Delete the window state/ref (~lines 68–69): `channelWindowStart`, `setChannelW
 	}, []);
 ```
 
-- [ ] **Step 5: Add `renderChannelRow`** — near the other memoized render logic (after `currentTimePosition`, ~line 376), add the itemRenderer built from the existing row body. It renders `filteredChannels[index]`:
+- [ ] **Step 5a: Add `handleChannelRowFocus`** — near the other `useCallback`s (before `renderChannelRow`). This is the load-more focus trigger (uses Task 1's helper + Task 2's ref):
+
+```javascript
+	const handleChannelRowFocus = useCallback((index) => {
+		if (shouldLoadMore({
+			focusedIndex: index,
+			loadedCount: filteredChannels.length,
+			hasMore: hasMoreChannelsRef.current,
+			isLoadingMore: isLoadingMoreRef.current
+		})) {
+			loadChannels();
+		}
+	}, [filteredChannels.length, loadChannels]);
+```
+
+- [ ] **Step 5b: Add `renderChannelRow`** — near the other memoized render logic (after `currentTimePosition`, ~line 376), the itemRenderer built from the existing row body. It renders `filteredChannels[index]`. **Spread `rest` onto the row root** (Sandstone injects `data-index` there — required for virtualization/Spotlight) and **do not** set a `key` (VirtualList wraps items in its own keyed internal div):
 
 ```javascript
 	const renderChannelRow = useCallback(({index, ...rest}) => {
@@ -253,7 +271,6 @@ Delete the window state/ref (~lines 68–69): `channelWindowStart`, `setChannelW
 		return (
 			<ChannelRowContainer
 				{...rest}
-				key={channel.Id}
 				className={css.channelRow}
 				data-channel-id={channel.Id}
 				spotlightId={`ch-row-${channel.Id}`}
@@ -302,8 +319,6 @@ Delete the window state/ref (~lines 68–69): `channelWindowStart`, `setChannelW
 	}, [filteredChannels, programs, serverUrl, currentTimePosition, calculateProgramStyle, isCurrentProgram, handleProgramClick, onPlayChannel, handleChannelRowFocus]);
 ```
 
-(`handleChannelRowFocus` is defined in Task 5. If implementing tasks in order, add a temporary `const handleChannelRowFocus = () => {};` now and replace it in Task 5, or implement Task 5 Step 1–2 before this step.)
-
 - [ ] **Step 6: Replace the render body** — swap the `ProgramGridContainer` block (the `<ProgramGridContainer ...> ... </ProgramGridContainer>`, ~lines 450–516) for the split-axis structure:
 
 ```javascript
@@ -327,6 +342,8 @@ Delete the window state/ref (~lines 68–69): `channelWindowStart`, `setChannelW
 									itemSize={ROW_HEIGHT}
 									itemRenderer={renderChannelRow}
 									direction="vertical"
+									horizontalScrollbar="hidden"
+									verticalScrollbar="auto"
 									spotlightId="program-grid"
 									cbScrollTo={fn => { scrollToRef.current = fn; }}
 								/>
@@ -355,36 +372,13 @@ git commit -m "fix(livetv): render guide via VirtualList (vertical) + horizontal
 
 ---
 
-### Task 5: Focus-driven load-more + Spotlight IDs on program cells
+### Task 5: Stable Spotlight IDs on program cells
+
+Load-more (`handleChannelRowFocus`) and its `shouldLoadMore` import were added in Task 4. This task adds stable IDs to the program cells so recycled `VirtualList` DOM keeps focus identity.
 
 **Files:** Modify `packages/app/src/views/LiveTV/LiveTV.js`.
 
-**Interfaces:** Consumes `shouldLoadMore` (Task 1), `isLoadingMoreRef` (Task 2). Produces `handleChannelRowFocus`.
-
-- [ ] **Step 1: Import the helper** — with the util imports:
-
-```javascript
-import {shouldLoadMore} from '../../utils/liveTvPaging';
-```
-
-- [ ] **Step 2: Add the focus handler** — near the other `useCallback`s (before `renderChannelRow`), replace any temporary stub with:
-
-```javascript
-	const handleChannelRowFocus = useCallback((index) => {
-		if (shouldLoadMore({
-			focusedIndex: index,
-			loadedCount: filteredChannels.length,
-			hasMore: hasMoreChannelsRef.current,
-			isLoadingMore: isLoadingMoreRef.current
-		})) {
-			loadChannels();
-		}
-	}, [filteredChannels.length, loadChannels]);
-```
-
-(`renderChannelRow` from Task 4 already wires `onFocusCapture={() => handleChannelRowFocus(index)}` on the row and lists `handleChannelRowFocus` in its deps.)
-
-- [ ] **Step 3: Add stable spotlightId to program cells** — in `ProgramCell` (the component at ~line 31), add a `spotlightId` to the `SpottableDiv` so recycled cells keep identity:
+- [ ] **Step 1: Add stable spotlightId to program cells** — in `ProgramCell` (the component at ~line 31), add a `spotlightId` to the `SpottableDiv` so recycled cells keep identity:
 
 ```javascript
 		<SpottableDiv
@@ -397,13 +391,13 @@ import {shouldLoadMore} from '../../utils/liveTvPaging';
 		>
 ```
 
-- [ ] **Step 4: Lint** — `cd packages/app && npm run lint` → PASS.
+- [ ] **Step 2: Lint** — `cd packages/app && npm run lint` → PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add packages/app/src/views/LiveTV/LiveTV.js
-git commit -m "fix(livetv): load more on row focus proximity; stable program-cell spotlight IDs"
+git commit -m "fix(livetv): stable program-cell spotlight IDs for VirtualList recycling"
 ```
 
 ---
@@ -412,15 +406,23 @@ git commit -m "fix(livetv): load more on row focus proximity; stable program-cel
 
 **Files:** Modify `packages/app/src/views/LiveTV/LiveTV.js` (`handleChannelNumber` ~159–183; constant ~24).
 
-- [ ] **Step 1: Replace the scroll math with `scrollTo({index, focus})`** — inside `handleChannelNumber`, replace the `if (channelIndex >= 0) { ... }` block (the part that set `guideContent.scrollTop` and did the `setTimeout` focus) with:
+- [ ] **Step 1: Replace the scroll math with `scrollTo({index})` + explicit focus** — inside `handleChannelNumber`, replace the `if (channelIndex >= 0) { ... }` block (the part that set `guideContent.scrollTop` and did the `setTimeout`/`querySelector` focus) with:
 
 ```javascript
 			if (channelIndex >= 0 && scrollToRef.current) {
-				scrollToRef.current({index: channelIndex, animate: false, focus: true});
+				const target = filteredChannelsRef.current[channelIndex];
+				scrollToRef.current({index: channelIndex, animate: false});
+
+				let attempts = 0;
+				const focusChannel = () => {
+					if (Spotlight.focus(`ch-info-${target.Id}`)) return;
+					if (attempts++ < 5) setTimeout(focusChannel, 50);
+				};
+				setTimeout(focusChannel, 0);
 			}
 ```
 
-(`scrollTo` with `focus: true` scrolls the `VirtualList` to that channel and focuses it — confirmed API in `@enact/sandstone` 2.9.13, `VirtualList.js:135–164`. No manual `querySelector`/`.focus()` needed.)
+Rationale (Codex, grounded in `VirtualList.js:149` + `useThemeVirtualList.js:250`): `scrollTo`'s own `focus: true` focuses the item node it tracks by `data-index` — that's the `ChannelRowContainer` (a Spotlight *container*), not the spottable `ch-info-*` element. And the target item may not be mounted the instant `scrollTo` runs. So scroll first, then drive `Spotlight.focus` on the inner element with a short retry. (`Spotlight` is already imported at LiveTV.js:4; `filteredChannelsRef` already exists.)
 
 - [ ] **Step 2: Delete `CHANNEL_ROW_HEIGHT`** — remove `const CHANNEL_ROW_HEIGHT = 80;` (~line 24). Confirm no references remain:
 
@@ -445,6 +447,8 @@ git commit -m "fix(livetv): channel-number jump via VirtualList scrollTo; drop C
 `VirtualList` positions items with transforms, which can break `position: sticky` and can capture `scrollIntoView`. Verify and, if needed, apply the documented fallbacks. Do this on the dev serve first, then confirm on-device in Task 8.
 
 **Files:** Possibly modify `packages/app/src/views/LiveTV/LiveTV.js` / `LiveTV.module.less`.
+
+- [ ] **Step 0: Confirm `rest`/`data-index` landed on the row root** — dev serve, Live TV, then in the browser console: `document.querySelector('[data-index="0"]')`. Expected: it returns the **channel row** element (the `.channelRow` container). If it returns `null` or a wrapper that isn't the row, `rest` isn't being forwarded by `ChannelRowContainer` — fix by ensuring the spread lands on the DOM node (VirtualList reads `itemNode.dataset.index` for positioning + Spotlight restoration; `VirtualListBasic.js:284`). Also set `noAffordance` on the `VirtualList` if rows look misaligned near the bottom (Sandstone adds bottom affordance space by default).
 
 - [ ] **Step 1: Check the sticky channel column** — dev serve, Live TV, scroll horizontally. Expected: the 200px channel column stays pinned left while program cells scroll under the time header.
   - If sticky holds: no change.
@@ -518,9 +522,9 @@ git push -u origin fix/livetv-epg-scroll
 **Spec coverage:**
 - VirtualList (vertical) + horizontal wrapper split → Tasks 3, 4. ✅
 - itemRenderer renders one row → Task 4 Step 5. ✅
-- Stable Spotlight IDs (row/channel-info/program) → Task 4 Step 5 + Task 5 Step 3. ✅
-- Load-more via focus proximity + append guard → Tasks 5, 2. ✅
-- Channel-number jump via `cbScrollTo`/`scrollTo({index, focus})` → Task 6. ✅
+- Stable Spotlight IDs (row/channel-info/program) → Task 4 Step 5b + Task 5. ✅
+- Load-more via focus proximity + append guard → Tasks 4 (5a), 2. ✅
+- Channel-number jump via `scrollTo({index})` + explicit `Spotlight.focus` retry → Task 6. ✅
 - Time-header sync from horizontal wrapper → Task 4 Step 4. ✅
 - Remove dead windowing → Task 4 Steps 2,3,7. ✅
 - Layout unknowns (sticky, horizontal focus scroll) → Task 7. ✅
@@ -528,6 +532,6 @@ git push -u origin fix/livetv-epg-scroll
 - Build without Tizen Studio + Apps2Samsung → Task 8. ✅
 - Perf at 560 channels → Task 8 Step 4. ✅
 
-**Placeholder scan:** No TBD/TODO. The only forward reference is `handleChannelRowFocus` (Task 4 Step 5 uses it, Task 5 defines it) — called out explicitly with a stub instruction. Fix if implementing strictly in order by doing Task 5 Steps 1–2 before Task 4 Step 5.
+**Placeholder scan:** No TBD/TODO. Forward-reference resolved: `handleChannelRowFocus` is now defined in Task 4 Step 5a, before `renderChannelRow` (5b) uses it — no stub needed.
 
-**Type consistency:** `shouldLoadMore({focusedIndex, loadedCount, hasMore, isLoadingMore, threshold})` defined in Task 1, called with those keys in Task 5. `isLoadingMoreRef` (Task 2) read in Task 5. `scrollToRef` set in Task 4 Step 6, used in Task 6. `renderChannelRow`/`guideHorizontalRef`/`handleHorizontalScroll` all defined in Task 4. `ROW_HEIGHT`/`CHANNEL_COLUMN_WIDTH` defined in Task 4 Step 2, used in Task 4 Steps 6. ✅
+**Type consistency:** `shouldLoadMore({focusedIndex, loadedCount, hasMore, isLoadingMore, threshold})` defined in Task 1, called with those keys in Task 4 Step 5a. `isLoadingMoreRef` (Task 2) read in Task 4 Step 5a. `scrollToRef` set in Task 4 Step 6, used in Task 6. `renderChannelRow`/`handleChannelRowFocus`/`guideHorizontalRef`/`handleHorizontalScroll` all defined in Task 4. `ROW_HEIGHT`/`CHANNEL_COLUMN_WIDTH` defined in Task 4 Step 2, used in Task 4 Step 6. ✅
