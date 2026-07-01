@@ -29,7 +29,7 @@ Pure decision logic for "fetch the next channel batch?", TDD'd in isolation, col
 - Test: `packages/app/src/utils/liveTvPaging.test.js`
 
 **Interfaces:**
-- Produces: `shouldLoadMore({focusedIndex, loadedCount, hasMore, isLoadingMore, threshold})` → `boolean`. `true` iff `hasMore && !isLoadingMore && loadedCount > 0 && focusedIndex >= loadedCount - threshold`. `threshold` defaults to `10`.
+- Produces: `shouldLoadMore({focusedIndex, loadedCount, hasMore, isLoadingMore, threshold})` → `boolean`. `true` iff `hasMore && !isLoadingMore && loadedCount > 0 && focusedIndex >= loadedCount - threshold - 1` (i.e. focus is within `threshold` rows of the last index). `threshold` defaults to `10`.
 
 - [ ] **Step 1: Write the failing test** — create `packages/app/src/utils/liveTvPaging.test.js`:
 
@@ -76,7 +76,7 @@ describe('shouldLoadMore', () => {
 export const shouldLoadMore = ({focusedIndex, loadedCount, hasMore, isLoadingMore, threshold = 10}) => {
 	if (!hasMore || isLoadingMore) return false;
 	if (loadedCount <= 0) return false;
-	return focusedIndex >= loadedCount - threshold;
+	return focusedIndex >= loadedCount - threshold - 1;
 };
 ```
 
