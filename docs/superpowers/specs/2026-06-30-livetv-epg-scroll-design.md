@@ -1,4 +1,4 @@
-# Live TV EPG "blank past first page" — Design
+# Live TV EPG "blank past first page" — Design (Route A: VirtualList)
 
 **Date:** 2026-06-30
 **Repo:** fork of `Moonfin-Client/Smart-TV` at tag `2.6.0`
@@ -9,152 +9,169 @@
 ## Problem
 
 In the Live TV **Program Guide (EPG)**, scrolling (via TV remote d-pad) beyond the
-first page of channels makes the whole guide grid **go completely blank**. Focus
-also dead-ends — you cannot navigate further down or scroll back up cleanly.
+first page of channels makes the whole guide grid **go completely blank**, and
+focus dead-ends — you cannot navigate further or scroll back cleanly.
 
 ## Root cause
 
-The guide uses a **hand-rolled vertical virtualization** that fights the Tizen
+The guide uses a **hand-rolled vertical virtualization** that fights Tizen's
 focus system:
 
-- Only a slice of channels is mounted:
-  `visibleChannels = filteredChannels.slice(channelWindowStart, windowEnd)`
-  (`windowEnd = channelWindowStart + VISIBLE_ROWS(16) + OVERSCAN_ROWS(6)*2`).
-  Rows outside the window exist only as the **height of top/bottom spacer divs** —
-  they are not in the DOM and are not focusable.
+- Only a slice of channels is mounted (`visibleChannels =
+  filteredChannels.slice(channelWindowStart, windowEnd)`). Rows outside the
+  window exist only as the height of top/bottom spacer divs — not in the DOM,
+  not focusable.
 - `channelWindowStart` advances **only** inside `handleScroll` (the
-  `.guideContent` container's `onScroll`), via `firstVisibleIndex = scrollTop / 80`.
-- On a d-pad TV there is no scrollbar drag. Focus moves between rows and
-  `scrollIntoView({behavior: 'smooth'})` scrolls the container. If Tizen's WebKit
-  delays, coalesces, or drops scroll events during smooth scrolling, the mounted
-  window **falls behind** the viewport. Once the viewport reaches the bottom
-  spacer, there are no mounted rows there → **blank**, and Spotlight has no
-  focusable element below → navigation dead-ends.
+  `.guideContent` `onScroll`). On a d-pad TV there is no scrollbar drag: focus
+  moves and `scrollIntoView` scrolls. If Tizen's WebKit delays/coalesces/drops
+  scroll events during smooth scrolling, the mounted window falls behind; once
+  the viewport reaches the bottom spacer, no rows are mounted there → **blank**,
+  and Spotlight has no focusable element below → dead-end.
+- Secondary: window shifts can unmount the focused row (Spotlight's current node
+  goes stale); `CHANNEL_ROW_HEIGHT = 80` ignores `.channelRow`'s `+1px` border.
 
-Contributing/secondary issues:
-- When the window shifts, the currently focused row can be **unmounted** (React
-  recycles the slice), so Spotlight's current node goes stale. Program cells have
-  no stable `spotlightId` (only `data-program-id`), making recovery harder.
-- Row-height math assumes `CHANNEL_ROW_HEIGHT = 80`, but `.channelRow` is
-  `height: 80px` **plus** `border-bottom: 1px` under default `content-box` sizing,
-  so the spacer/index math drifts ~1px per row.
+## Why virtualization must stay (design constraint)
 
-This diagnosis and the chosen direction were reviewed by Codex (peer consult,
-2026-06-30), which ranked the same causes and recommended the targeted fix below
-over a `VirtualList` migration.
+Kevin's lineup is **~560 channels**. Rendering all rows (each a sticky channel
+column + an absolute-positioned 6-hour program strip) is too heavy for the TV.
+So we cannot "render all"; we must **keep virtualization but make it correct with
+Spotlight**. Spotlight always chooses the next focus target from the
+**currently-mounted DOM**, so any hand-rolled windowing races Tizen scroll timing
+and React commit timing. The robust answer is to hand that problem to Enact's
+purpose-built virtualization.
 
-## Chosen approach — remove vertical windowing, render all loaded channels
+This diagnosis and the Route-A decision below were reviewed by Codex across four
+consults (2026-06-30): it recommended `VirtualList` with the two axes split, over
+extending the manual windowing, specifically because of the 560-channel scale.
 
-Delete the manual vertical virtualization entirely and render **all currently
-loaded** `filteredChannels`. Keep the existing paged API loading (50 channels per
-batch). Rationale:
+## Chosen approach — Route A: Enact `VirtualList`, axes split
 
-- Kills the failure mode at the source: every loaded row is mounted and
-  focusable, so there is no unmounted region to go blank and no focus dead-end.
-- Small, low-risk diff for a personal build. No dependency on `onScroll` timing
-  for *rendering* correctness.
-- Live TV channel counts are modest (tens to a few hundred). Each row still only
-  renders the handful of program cells that fall inside the fixed 6-hour window,
-  so per-row cost is bounded.
+Replace the hand-rolled windowing with Enact `VirtualList`
+(`@enact/sandstone/VirtualList`, already used in the repo), and **split the two
+axes** so `VirtualList` only ever handles fixed-height vertical rows:
 
-Rejected (Codex-concurred): migrating to Enact `VirtualList`/`VirtualGridList`.
-It is the right long-term tool and is already used elsewhere in the app
-(Favorites, Library, Jellyseerr, Genres), but this EPG is a **two-axis** grid
-(vertical channels × horizontal absolute-positioned program cells, sticky channel
-column, synced time header). Adapting it is a real rewrite with focus-integration
-risk — out of scope for fixing this bug.
+- **Vertical (channels):** `VirtualList` owns it. `dataSize =
+  filteredChannels.length`, `itemSize = ri.scale(80)`, `direction="vertical"`,
+  `spotlightId="program-grid"`. Its `itemRenderer({index})` renders exactly one
+  channel row (the existing row body).
+- **Horizontal (time):** a wrapper *outside* `VirtualList` owns it —
+  `.guideHorizontalScroller` (`overflow-x: auto; overflow-y: hidden; flex: 1`)
+  containing a wide surface (`width: channelColumnWidth + HOURS_TO_DISPLAY *
+  PIXELS_PER_HOUR`, i.e. `200 + 3600 = 3800px`) that holds the `VirtualList`.
+- **Time-header sync** moves from `guideContent.scrollLeft` to the horizontal
+  wrapper's `scrollLeft` (`onScroll` on `.guideHorizontalScroller`).
+
+`VirtualList` never handles horizontal scrolling — it only sees fixed-height rows.
+The horizontal wrapper scrolls the wide row contents; the time header mirrors it.
+
+Rejected — **Route B (fix the hand-rolled windowing to be focus-driven /
+focus-safe):** achievable (buffer window around the focused index, restore focus
+in `useLayoutEffect` after commits) but it stays a focus/scroll race tuned against
+Tizen timing. Not robust enough at 560 channels. Only fall back to B if Route A
+is blocked by an Enact API limitation discovered during implementation.
 
 ## Changes
 
-### 1. Render all loaded channels (remove windowing)
-`LiveTV.js`:
-- Remove `channelWindowStart`, `channelWindowStartRef`, `setChannelWindowStart`,
-  the `windowEnd`/`visibleChannels`/`topSpacerHeight`/`bottomSpacerHeight`
-  computation, the two spacer `<div>`s, and the `channelWindowStartRef >= length`
-  reset effect.
-- Map over `filteredChannels` directly to render channel rows.
-- Remove the now-dead windowing constants `VISIBLE_ROWS`, `OVERSCAN_ROWS`, and
-  `CHANNEL_ROW_HEIGHT` (change 3 switches the last consumer to `offsetTop`).
+### 1. Restructure the guide layout (LiveTV.js + LiveTV.module.less)
+- Replace the both-axis `.guideContent` `ProgramGridContainer` with:
+  `.guideHorizontalScroller` (ref `guideHorizontalRef`, `onScroll` →
+  horizontal-sync handler) → `.guideWideSurface` (fixed 3800px width) →
+  `<VirtualList>`.
+- CSS: add `.guideHorizontalScroller { overflow-x:auto; overflow-y:hidden;
+  flex:1; }`, `.guideWideSurface { width: <200 + 3600>px; height:100%; }`. Keep
+  `.channelRow`, `.channelInfo`, `.programsContainer`, `.programCell` as-is; add
+  `box-sizing: border-box` to `.channelRow` so its measured height is exactly 80.
 
-### 2. Decouple "load more" from onScroll alone
-`onScroll` reliability on Tizen is itself suspect, so infinite loading must not
-depend solely on it:
-- **Primary trigger:** add `onFocusCapture={() => handleChannelRowFocus(index)}`
-  to each `ChannelRowContainer` (LiveTV.js:458, inside the `filteredChannels.map`
-  at :457). React focus **bubbles** from both the `.channelInfo` element and the
-  descendant `ProgramCell`s (:489), so this fires on focus anywhere in the row —
-  no need to add stable `spotlightId`s to program cells. `handleChannelRowFocus`
-  calls `loadChannels()` when `index >= loadedCount - THRESHOLD` (THRESHOLD ≈ 10).
-- **Keep** the existing scroll-position trigger in `handleScroll` as a secondary
-  path (covers pointer/scroll; harmless).
-- **Add a dedicated append in-flight guard.** `isLoading` only wraps the
-  initial/date-reset load (LiveTV.js:150) — it does **not** guard append calls, so
-  the focus trigger and the scroll trigger could fire `loadChannels()`
-  concurrently and both read the same `currentChannelIndexRef.current` (:114),
-  double-appending or skipping a batch. Introduce `isLoadingMoreRef` set at the
-  **top of `loadChannels`** (for non-reset calls) and cleared in a `finally`;
-  bail early if already set. Preserve the existing `hasMoreChannelsRef` and
-  `CHANNELS_PER_BATCH` guards.
+### 2. `itemRenderer` renders one channel row
+- Extract `renderChannelRow = useCallback(({index, key, ...rest}) => {...})`
+  returning the existing row markup for `filteredChannels[index]` (channel column
+  + program strip + current-time indicator). It must spread the Enact-provided
+  props onto the row root and use the provided `key`.
+- Program cells must keep the `currentTimePosition` indicator and
+  `calculateProgramStyle` logic unchanged.
 
-### 3. Fix the row-height mismatch
-Since we no longer use spacer math, `CHANNEL_ROW_HEIGHT`-based pixel math
-disappears. The one remaining consumer is the channel-number quick-jump
-(`handleChannelNumber` at LiveTV.js:173 sets `guideContent.scrollTop` from
-`index * CHANNEL_ROW_HEIGHT`, which drifts because `.channelRow` is `height:80px`
-**plus** a `1px` border under `content-box`, LiveTV.module.less:132). Because all
-loaded rows are now mounted, switch the jump to query the target row element and
-use its **`offsetTop`** — robust to any future height/border change — and delete
-`CHANNEL_ROW_HEIGHT`.
+### 3. Stable Spotlight IDs
+`VirtualList` recycles item DOM, so focus targets need stable IDs:
+- Row container: `spotlightId={`ch-row-${channel.Id}`}` (already present).
+- Channel-info element: add `spotlightId={`ch-info-${channel.Id}`}`.
+- Program cells: add `spotlightId={`program-${channel.Id}-${program.Id}`}` (pass
+  channel + program into `ProgramCell`).
 
-### 4. Keep the time-header horizontal sync
-`handleScroll` still syncs `timeSlotsRef.scrollLeft = guideContent.scrollLeft`.
-That behavior is unrelated to the bug and stays.
+### 4. Load-more without the old scroll math
+Trigger paging from row **focus** (a real event, reliable on Tizen), not from a
+render side-effect and not from container scrollTop:
+- Primary: `onFocusCapture={() => handleChannelRowFocus(index)}` on each row; the
+  handler calls `loadChannels()` when `shouldLoadMore({focusedIndex: index,
+  loadedCount: filteredChannels.length, hasMore, isLoadingMore})` (threshold ≈ 10).
+  Focus bubbles from the channel-info element and program cells to the row.
+- Backup: `VirtualList`'s `onScrollStop` may also probe `shouldLoadMore` using the
+  last rendered index, for pointer/wheel scroll. (Do **not** call `loadChannels`
+  from inside `itemRenderer` — that is a render-time side effect.)
+- **Add a dedicated append guard** `isLoadingMoreRef`: `isLoading` only wraps the
+  initial/date-reset load, not appends, so concurrent triggers could double-fetch
+  off the same `currentChannelIndexRef.current`. Set it (for append calls only) at
+  the top of `loadChannels` and clear it in a `finally` (append calls only).
 
-## Diagnostic step (before finalizing)
-Before committing the fix as final, confirm the root cause on-device with a
-temporary logging build (guarded, removed before final):
-- Log `scrollTop`, focused channel id/index, and whether `document.activeElement`
-  stays connected after scrolling.
-- Temporarily set `scrollIntoView` `behavior: 'auto'` to test whether smooth-scroll
-  event lag is implicated.
-If disabling windowing makes the blank disappear, the diagnosis is confirmed.
+### 5. Channel-number quick-jump via VirtualList scroll-to
+The old `scrollTop = index * CHANNEL_ROW_HEIGHT` cannot target a `VirtualList`.
+Use `VirtualList`'s official scroll-to callback (confirmed present in installed
+`@enact/sandstone` **2.9.13**, `VirtualList.js:135–164`):
+- Set `cbScrollTo={fn => { scrollToRef.current = fn; }}` on the list.
+- On a channel-number match, call
+  `scrollToRef.current({index: channelIndex, animate: false, focus: true})`.
+  The `focus: true` option makes VirtualList focus the item after scrolling, so
+  no manual `.focus()` is needed (the `setTimeout`/`querySelector` focus dance is
+  removed). `scrollTo` accepts exactly one of `position`/`align`/`index`/`node`.
+- Delete `CHANNEL_ROW_HEIGHT` (no longer used).
+
+### 6. Remove dead windowing code
+Delete `channelWindowStart`/`channelWindowStartRef`/`setChannelWindowStart`, the
+`windowEnd`/`visibleChannels`/`topSpacerHeight`/`bottomSpacerHeight` computation,
+both spacer divs, the `channelWindowStartRef >= length` reset effect, the
+window-advance block in `handleScroll`, and the constants `VISIBLE_ROWS`,
+`OVERSCAN_ROWS` (and `CHANNEL_ROW_HEIGHT` after change 5).
+
+## Implementation-time verifications (must resolve before/while coding)
+These are unknowns that determine exact code; verify via a quick prototype:
+1. ~~**Scroll-to API**~~ — RESOLVED: `cbScrollTo` → `scrollTo({index, animate,
+   focus})` in sandstone 2.9.13 (see change 5).
+2. **`position: sticky` inside a `VirtualList` item:** does the 200px channel
+   column stay pinned-left while the wide surface scrolls horizontally? If sticky
+   breaks inside recycled `VirtualList` DOM, fall back to a separate fixed
+   channel-column overlay synchronized by row index. Try sticky first.
+3. **`scrollIntoView` interaction:** confirm a focused program cell's
+   `scrollIntoView({inline:'nearest'})` scrolls the **horizontal wrapper**, not
+   the `VirtualList`'s internal vertical scroller (adjust to `block:'nearest'`
+   vs `inline` as needed).
 
 ## Testing
-
-- **Unit (optional, TDD where it fits):** the load-more decision is pure logic —
-  optionally extract a thin helper
-  `shouldLoadMore({focusedIndex, loadedCount, hasMore, isLoadingMore, threshold})`
-  and unit-test it with the repo's existing runner. Boundary cases: focus on last
-  row, `hasMore` false, already loading, empty list. Keep it thin — do not
-  overbuild scroll math around it; the authoritative test is on-device d-pad
-  navigation.
-- **End-to-end (authoritative):** build `.wgt`, install via Apps2Samsung, open
-  Live TV, and d-pad scroll well past the first page. Confirm: rows keep
-  rendering, focus is retained, no blank region, and additional batches load.
-- **Regression:** favorites filter toggle still works (list shrinks/grows without
-  blanking); channel-number quick-jump still scrolls to the right channel.
-- **Perf check:** verify smooth scrolling at 50 / 100 / 200+ loaded channels. If
-  unacceptable, revisit (Enact `VirtualList`) — but only then.
+- **Unit (TDD):** `shouldLoadMore({focusedIndex, loadedCount, hasMore,
+  isLoadingMore, threshold})` pure helper in `packages/app/src/utils/`, tested
+  with the repo runner (`enact test`). Boundaries: near end, `hasMore` false,
+  already loading, empty list (`loadedCount<=0` → false).
+- **Prototype (de-risk):** before wiring real data, stand up the split-axis
+  layout with ~100 fake rows; confirm vertical d-pad scrolling never blanks,
+  horizontal scroll + header sync works, and sticky channel column holds.
+- **End-to-end (authoritative)** on the TV via Apps2Samsung: d-pad down **past
+  100+ and toward all ~560** channels (no blank, focus retained, batches load);
+  horizontal left/right across program cells; channel-number jump to a far index;
+  focus return from guide controls (up/down interplay); favorites filter.
+- **Perf:** confirm smooth scrolling at the full 560-channel lineup (the whole
+  point of keeping virtualization).
 
 ## Build & deploy (no Tizen Studio)
-
-- Node 18+ (local is v24). v24 is within the dependency range (`ilib` requires
-  `>=8 <25`), so it should build. If the build tooling fails, fall back to Node
-  20/22 LTS (via nvm) — don't pre-solve this; discover at build time.
-- `npm install` at repo root (npm workspaces).
-- Build + package with `npm run build:tizen -- --skip-tizen-cli` (package.json:11),
-  which uses `build-wgt.js`'s **zip fallback** (produces an *unsigned* `.wgt`).
-  **Caveat:** the fallback shells out to an external `zip` binary
-  (build-wgt.js:84) and hard-fails if it's missing (build-wgt.js:463). Windows
-  has no `zip` by default and `Compress-Archive` is **not** substituted
-  automatically. So the build step must first check for `zip`; if absent, either
-  (a) provide a `zip` on PATH, or (b) run an explicit `Compress-Archive` (or Node)
-  step over the built `dist/` to emit a byte-valid `.wgt`. This is a build-time
-  action item, not a code change to the repo.
-- Install the unsigned `.wgt` via **Apps2Samsung**, which handles the developer
-  certificate/signing and pushes to the TV.
+- Node 18+ (local v24 is within `ilib >=8 <25`; fall back to Node 20/22 LTS if
+  build tooling fails). `npm install` at repo root.
+- Package with `npm run build:tizen -- --skip-tizen-cli` (unsigned zip fallback,
+  `build-wgt.js`). `zip` is **not** on this Windows PATH and is not auto-
+  substituted, so the build step must supply a `zip` binary OR run an explicit
+  `Compress-Archive` over `packages/build-tizen/dist` (contents at archive root,
+  `config.xml` at top level) to emit a valid `.wgt`.
+- Install the unsigned `.wgt` via **Apps2Samsung** (handles dev-cert signing +
+  push to TV).
 
 ## Out of scope
-- `VirtualList` migration.
+- `VirtualGridList` for the program cells (horizontal strip stays absolute-
+  positioned within each row).
 - Any change to Recordings, playback (AVPlay), or non-LiveTV views.
 - Upstream PR formatting (personal build).
